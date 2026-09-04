@@ -17,7 +17,8 @@ import {
   CheckCircle2, 
   AlertTriangle, 
   Users,
-  RotateCcw
+  RotateCcw,
+  Activity
 } from 'lucide-react';
 import { ComposeModal } from './components/ComposeModal';
 import { HighlightSnippet } from './utils/highlightHelper';
@@ -200,6 +201,13 @@ export default function App(): React.JSX.Element {
   // Search State
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeSearch, setActiveSearch] = useState<string>('');
+
+  // Build safe Bull Board Queue Monitor URL from API configuration
+  const queueMonitorUrl = useMemo(() => {
+    const apiUrl = (import.meta as unknown as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL || 'http://localhost:5000';
+    const baseOrigin = apiUrl.replace(/\/api\/?$/, '').replace(/\/+$/, '');
+    return `${baseOrigin}/admin/queues`;
+  }, []);
 
   // Check Current Authentication State
   const checkAuth = async () => {
@@ -470,6 +478,19 @@ export default function App(): React.JSX.Element {
           {/* User Profile & Logout */}
           {user && (
             <div className="flex items-center space-x-3 sm:space-x-4">
+              <a
+                href={queueMonitorUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                id="queue-monitor-link"
+                className="inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700/80 transition active:scale-[0.98]"
+                title="Open Bull Board Queue Monitor"
+                aria-label="Open Bull Board Queue Monitor"
+              >
+                <Activity className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden sm:inline">Queue Monitor</span>
+              </a>
+
               <div className="flex items-center space-x-2.5">
                 <UserAvatar 
                   name={user.name} 

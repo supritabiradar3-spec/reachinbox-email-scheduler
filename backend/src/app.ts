@@ -6,6 +6,8 @@ import passport from 'passport';
 import { config } from './config/env.js';
 import { sessionRedisClient } from './config/redis.js';
 import { configurePassport } from './config/passport.js';
+import { requireAuth, requireBullBoardAuth } from './middleware/auth.middleware.js';
+import { bullBoardRouter } from './config/bullBoard.js';
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import campaignRoutes from './routes/campaign.routes.js';
@@ -58,6 +60,9 @@ export const createApp = (): Express => {
   app.use(passport.initialize());
   app.use(passport.session());
 
+  // Protected Bull Board Queue Monitor Route
+  app.use('/admin/queues', requireBullBoardAuth, bullBoardRouter);
+
   // API Routes
   app.use('/api', healthRoutes);
   app.use('/api/auth', authRoutes);
@@ -70,7 +75,7 @@ export const createApp = (): Express => {
     res.json({
       name: 'ReachInbox Email Scheduler API',
       version: '1.0.0',
-      phase: 5,
+      phase: 7,
       status: 'active',
       endpoints: {
         health: '/api/health',
@@ -80,6 +85,9 @@ export const createApp = (): Express => {
           me: '/api/auth/me',
           logout: '/api/auth/logout'
         },
+        admin: {
+          queues: '/admin/queues'
+        },
         senders: {
           list: 'GET /api/senders'
         },
@@ -88,7 +96,8 @@ export const createApp = (): Express => {
         },
         emails: {
           scheduled: 'GET /api/emails/scheduled',
-          sent: 'GET /api/emails/sent'
+          sent: 'GET /api/emails/sent',
+          search: 'GET /api/emails/search'
         }
       }
     });

@@ -1,10 +1,11 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, DelayedError } from 'bullmq';
 import { config } from './config/env.js';
 import { prisma } from './config/prisma.js';
 import { getConfiguredSenders } from './config/senders.config.js';
 import { EMAIL_QUEUE_NAME } from './queues/email.queue.js';
 import { sendEmail, verifyAllTransporters, sanitizeError } from './services/email.service.js';
 import { indexSentEmail, ensureSentEmailsIndex } from './services/elasticsearch.service.js';
+import { reserveDispatchSlot } from './services/rateLimiter.service.js';
 
 // Pre-flight check: Fail fast if no valid Ethereal SMTP senders are configured
 const configuredSenders = getConfiguredSenders();
@@ -14,38 +15,53 @@ if (configuredSenders.length === 0) {
   process.exit(1);
 }
 
-const concurrency = parseInt(process.env.WORKER_CONCURRENCY || '5', 10);
+/**
+ * Validates and bounds worker concurrency to a safe positive integer (1 to 50).
+ */
+export const getWorkerConcurrency = (): number => {
+  const raw = process.env.WORKER_CONCURRENCY;
+  const parsed = parseInt(raw || '5', 10);
+  if (isNaN(parsed) || parsed < 1) {
+    return 5;
+  }
+  return Math.min(parsed, 50);
+};
+
+const concurrency = getWorkerConcurrency();
 
 /**
  * ==============================================================================
- * ReachInbox Email Scheduler - BullMQ Background Worker (Phase 5)
+ * ReachInbox Email Scheduler - BullMQ Background Worker (Phase 7)
  * ==============================================================================
  *
- * Exactly-Once Delivery Architecture & SMTP Limitations:
- * ------------------------------------------------------
- * Due to the fundamental nature of network protocols and remote SMTP mail servers,
- * mathematically pure "exactly-once" delivery across distributed systems cannot be
- * 100% guaranteed if a catastrophic process or network crash occurs in the tiny
- * millisecond window between the SMTP provider accepting the email (RCPT TO/DATA)
- * and the local database status update committing.
- *
- * To minimize duplicate risks to near zero in production, this worker implements:
- * 1. Deterministic BullMQ job IDs (`email-${emailId}`) preventing duplicate queue entries.
- * 2. Atomic database conditional updates (`status: { not: 'SENT' }` -> `status: 'PROCESSING'`)
- *    preventing parallel execution by concurrent worker threads.
- * 3. Pre-flight idempotency checks verifying if the record is already `SENT` before SMTP dispatch.
- * 4. BullMQ job locks held during transmission.
+ * Distributed Rate Limiting & Exactly-Once Delivery Architecture:
+ * ---------------------------------------------------------------
+ * 1. Redis Atomic Rate Reservation:
+ *    - Rolling 60-minute window for campaign `hourlyLimit`.
+ *    - Minimum dispatch interval for campaign `delaySeconds`.
+ *    - Evaluated atomically in Redis via Lua before acquiring processing lock.
+ * 2. Non-Destructive Delay Lifecycle:
+ *    - Rate-limited jobs are marked `RATE_LIMITED` and deferred with `job.moveToDelayed()`.
+ *    - Job maintains deterministic ID (`email-${id}`) and is not counted as a failure.
+ * 3. Idempotency & Concurrency Locks:
+ *    - Pre-flight verification skips already `SENT` records permanently.
+ *    - Atomic MySQL lock (`status: { not: 'SENT' }` -> `status: 'PROCESSING'`).
+ * 4. Multi-sender SMTP & Resilient Elasticsearch Indexing:
+ *    - Success on SMTP is authoritative even if ES indexing is deferred.
  * ==============================================================================
  */
 
-interface EmailJobData {
+export interface EmailJobData {
   emailId: string;
 }
 
 /**
  * Job processing function invoked for each delayed email job in the BullMQ queue.
  */
-export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => {
+export const processEmailJob = async (
+  job: Job<EmailJobData>,
+  token?: string
+): Promise<void> => {
   const { emailId } = job.data;
 
   if (!emailId || typeof emailId !== 'string') {
@@ -53,9 +69,18 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
     return;
   }
 
-  // 1. Fetch ScheduledEmail record from MySQL
+  // 1. Fetch ScheduledEmail record with Campaign relation from MySQL
   const emailRecord = await prisma.scheduledEmail.findUnique({
-    where: { id: emailId }
+    where: { id: emailId },
+    include: {
+      campaign: {
+        select: {
+          id: true,
+          hourlyLimit: true,
+          delaySeconds: true
+        }
+      }
+    }
   });
 
   if (!emailRecord) {
@@ -63,13 +88,48 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
     return;
   }
 
-  // 2. Pre-check: Skip safely if email is already marked as SENT
+  // 2. Pre-check: Skip permanently if email is already marked as SENT
   if (emailRecord.status === 'SENT') {
     console.log(`[Worker] Email ${emailId} is already marked as SENT. Skipping duplicate transmission.`);
     return;
   }
 
-  // 3. Atomic status transition: Transition from non-SENT to PROCESSING
+  // 3. Distributed Redis Rate Limit Reservation (Rolling 60m hourly limit & delay interval)
+  if (emailRecord.campaign) {
+    const reservation = await reserveDispatchSlot({
+      campaignId: emailRecord.campaign.id,
+      hourlyLimit: emailRecord.campaign.hourlyLimit,
+      delaySeconds: emailRecord.campaign.delaySeconds,
+      emailId: emailRecord.id
+    });
+
+    if (!reservation.allowed) {
+      const waitMs = Math.max(1000, reservation.waitMs);
+      const nextEligibleTime = new Date(Date.now() + waitMs);
+
+      // Update database status to RATE_LIMITED with deferred target time
+      await prisma.scheduledEmail.update({
+        where: { id: emailId },
+        data: {
+          status: 'RATE_LIMITED',
+          scheduledAt: nextEligibleTime
+        }
+      });
+
+      console.log(
+        `[Worker] Email ${emailId} (Campaign: ${emailRecord.campaign.id}) rate-limited (${reservation.reason}). Deferring by ${waitMs}ms to ${nextEligibleTime.toISOString()}`
+      );
+
+      // Move BullMQ job to delayed state without marking as FAILED
+      if (token) {
+        await job.moveToDelayed(Date.now() + waitMs, token);
+        throw new DelayedError();
+      }
+      return;
+    }
+  }
+
+  // 4. Atomic status transition: Transition from non-SENT to PROCESSING
   const lockResult = await prisma.scheduledEmail.updateMany({
     where: {
       id: emailId,
@@ -86,7 +146,7 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
   }
 
   try {
-    // 4. Dispatch email via Ethereal SMTP service using the campaign's senderKey
+    // 5. Dispatch email via Ethereal SMTP service using the campaign's senderKey
     const result = await sendEmail({
       senderKey: emailRecord.senderKey,
       recipientEmail: emailRecord.recipientEmail,
@@ -94,7 +154,7 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
       body: emailRecord.body
     });
 
-    // 5. On successful SMTP transmission: mark SENT with metadata
+    // 6. On successful SMTP transmission: mark SENT with metadata
     await prisma.scheduledEmail.update({
       where: { id: emailId },
       data: {
@@ -109,19 +169,24 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
 
     console.log(`[Worker] Email ${emailId} sent successfully via [${emailRecord.senderKey}]. Preview: ${result.etherealPreviewUrl || 'N/A'}`);
 
-    // 5b. Index sent email into Elasticsearch (non-fatal if indexing fails, never resends email)
+    // 6b. Index sent email into Elasticsearch (non-fatal if indexing fails, never resends email)
     try {
       await indexSentEmail(emailId);
     } catch (esErr: unknown) {
       console.warn(`[Worker] Elasticsearch indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
     }
   } catch (error: unknown) {
+    // If this is a BullMQ DelayedError from moving to delayed, let it bubble up cleanly
+    if (error instanceof DelayedError || (error as Error)?.name === 'DelayedError') {
+      throw error;
+    }
+
     const sanitizedErrMsg = sanitizeError(error);
-    const maxAttempts = job.opts.attempts || 3;
+    const maxAttempts = job.opts?.attempts || 3;
     const currentAttempt = (emailRecord.attemptCount || 0) + 1;
     const isExhausted = currentAttempt >= maxAttempts;
 
-    // 6. On failure: record sanitized error and update status
+    // 7. On SMTP failure: record sanitized error and update status
     await prisma.scheduledEmail.update({
       where: { id: emailId },
       data: {
@@ -143,7 +208,7 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
 // Initialize BullMQ Worker
 console.log('==============================================');
 console.log('ReachInbox Email Scheduler - Worker Process');
-console.log(`Phase 5: Ethereal SMTP Dispatcher (Concurrency: ${concurrency})`);
+console.log(`Phase 7: Distributed Rate Controller & Dispatcher (Concurrency: ${concurrency})`);
 console.log(`Queue: ${EMAIL_QUEUE_NAME} | Redis: ${config.redisUrl}`);
 console.log('==============================================');
 
@@ -171,7 +236,9 @@ emailWorker.on('completed', (job: Job) => {
 });
 
 emailWorker.on('failed', (job: Job | undefined, err: Error) => {
-  console.warn(`[Worker] Job ${job?.id} failed: ${sanitizeError(err.message)}`);
+  if (err.name !== 'DelayedError') {
+    console.warn(`[Worker] Job ${job?.id} failed: ${sanitizeError(err.message)}`);
+  }
 });
 
 emailWorker.on('stalled', (jobId: string) => {

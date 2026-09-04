@@ -100,8 +100,7 @@ export const sanitizeError = (error: unknown): string => {
   const raw = error instanceof Error ? error.message : String(error);
   // Strip password patterns and credentials from error text
   return raw
-    .replace(/(?:pass|password|auth|token)=["']?[^"'\s&]+["']?/gi, 'pass=[REDACTED]')
+    .replace(/(?:pass|password|auth|token|secret|session|key)=["']?[^"'\s&]+["']?/gi, 'credential=[REDACTED]')
     .replace(/:\/\/(?:[^:@\s]+)?(?::[^@\s]+)?@/g, '://[REDACTED]:[REDACTED]@')
     .slice(0, 1000);
 };
-

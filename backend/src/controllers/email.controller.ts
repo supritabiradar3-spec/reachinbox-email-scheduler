@@ -5,6 +5,7 @@ import { searchUserSentEmails } from '../services/elasticsearch.service.js';
 
 /**
  * Retrieves paginated scheduled emails belonging exclusively to the authenticated user.
+ * Includes SCHEDULED, RATE_LIMITED, and PROCESSING states.
  */
 export const getScheduledEmails = async (req: Request, res: Response): Promise<void> => {
   if (!req.user) {
@@ -21,7 +22,7 @@ export const getScheduledEmails = async (req: Request, res: Response): Promise<v
       campaign: {
         userId: req.user.id
       },
-      status: 'SCHEDULED' as const
+      status: { in: [EmailStatus.SCHEDULED, EmailStatus.RATE_LIMITED, EmailStatus.PROCESSING] }
     };
 
     const [total, emails] = await Promise.all([
@@ -175,4 +176,3 @@ export const searchSentEmails = async (req: Request, res: Response): Promise<voi
     res.status(500).json({ status: 'error', message });
   }
 };
-
