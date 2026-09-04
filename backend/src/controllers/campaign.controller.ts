@@ -50,6 +50,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         emails: {
           select: {
             id: true,
+            senderKey: true,
             recipientEmail: true,
             subject: true,
             scheduledAt: true,
@@ -66,6 +67,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         message: 'Campaign already scheduled (idempotent replay)',
         campaign: {
           id: existingCampaign.id,
+          senderKey: existingCampaign.senderKey,
           subject: existingCampaign.subject,
           startTime: existingCampaign.startTime.toISOString(),
           delaySeconds: existingCampaign.delaySeconds,
@@ -98,6 +100,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
       const newCampaign = await tx.emailCampaign.create({
         data: {
           userId: req.user!.id,
+          senderKey: input.senderKey,
           subject: input.subject,
           body: input.body,
           startTime: startDateTime,
@@ -112,6 +115,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         const scheduledAt = calculateScheduledTime(startDateTime, index, input.delaySeconds);
         return {
           campaignId: newCampaign.id,
+          senderKey: input.senderKey,
           recipientEmail,
           subject: input.subject,
           body: input.body,
@@ -151,6 +155,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
       message: 'Campaign scheduled successfully',
       campaign: {
         id: campaign.id,
+        senderKey: campaign.senderKey,
         subject: campaign.subject,
         startTime: campaign.startTime.toISOString(),
         delaySeconds: campaign.delaySeconds,
@@ -160,6 +165,7 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
       },
       emails: createdEmails.map((email) => ({
         id: email.id,
+        senderKey: email.senderKey,
         recipientEmail: email.recipientEmail,
         subject: email.subject,
         scheduledAt: email.scheduledAt.toISOString(),

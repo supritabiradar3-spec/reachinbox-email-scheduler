@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { EmailStatus } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 
 /**
@@ -28,6 +29,7 @@ export const getScheduledEmails = async (req: Request, res: Response): Promise<v
         where: whereClause,
         select: {
           id: true,
+          senderKey: true,
           recipientEmail: true,
           subject: true,
           scheduledAt: true,
@@ -45,6 +47,7 @@ export const getScheduledEmails = async (req: Request, res: Response): Promise<v
       status: 'success',
       emails: emails.map((e) => ({
         id: e.id,
+        senderKey: e.senderKey,
         recipientEmail: e.recipientEmail,
         subject: e.subject,
         scheduledAt: e.scheduledAt.toISOString(),
@@ -81,7 +84,7 @@ export const getSentEmails = async (req: Request, res: Response): Promise<void> 
       campaign: {
         userId: req.user.id
       },
-      status: 'SENT' as const
+      status: { in: [EmailStatus.SENT, EmailStatus.FAILED] }
     };
 
     const [total, emails] = await Promise.all([
@@ -90,12 +93,15 @@ export const getSentEmails = async (req: Request, res: Response): Promise<void> 
         where: whereClause,
         select: {
           id: true,
+          senderKey: true,
           recipientEmail: true,
           subject: true,
           sentAt: true,
-          status: true
+          status: true,
+          smtpMessageId: true,
+          etherealPreviewUrl: true
         },
-        orderBy: { sentAt: 'desc' },
+        orderBy: [{ sentAt: 'desc' }, { updatedAt: 'desc' }],
         skip,
         take: limit
       })
@@ -107,10 +113,13 @@ export const getSentEmails = async (req: Request, res: Response): Promise<void> 
       status: 'success',
       emails: emails.map((e) => ({
         id: e.id,
+        senderKey: e.senderKey,
         recipientEmail: e.recipientEmail,
         subject: e.subject,
         sentAt: e.sentAt ? e.sentAt.toISOString() : null,
-        status: e.status
+        status: e.status,
+        smtpMessageId: e.smtpMessageId,
+        etherealPreviewUrl: e.etherealPreviewUrl
       })),
       pagination: {
         total,

@@ -10,6 +10,7 @@ import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import campaignRoutes from './routes/campaign.routes.js';
 import emailRoutes from './routes/email.routes.js';
+import senderRoutes from './routes/sender.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -62,13 +63,14 @@ export const createApp = (): Express => {
   app.use('/api/auth', authRoutes);
   app.use('/api/campaigns', campaignRoutes);
   app.use('/api/emails', emailRoutes);
+  app.use('/api/senders', senderRoutes);
 
   // Root endpoint info
   app.get('/', (_req: Request, res: Response) => {
     res.json({
       name: 'ReachInbox Email Scheduler API',
       version: '1.0.0',
-      phase: 4,
+      phase: 5,
       status: 'active',
       endpoints: {
         health: '/api/health',
@@ -77,6 +79,9 @@ export const createApp = (): Express => {
           googleCallback: '/api/auth/google/callback',
           me: '/api/auth/me',
           logout: '/api/auth/logout'
+        },
+        senders: {
+          list: 'GET /api/senders'
         },
         campaigns: {
           create: 'POST /api/campaigns'

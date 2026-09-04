@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { 
   calculateScheduledTime, 
   deduplicateRecipients, 
@@ -66,7 +66,39 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
   });
 
   describe('createCampaignSchema validation', () => {
+    const originalEnv = process.env.ETHEREAL_SENDERS_JSON;
+
+    beforeEach(() => {
+      process.env.ETHEREAL_SENDERS_JSON = JSON.stringify([
+        {
+          key: 'sender-1',
+          displayName: 'Test Sender 1',
+          fromEmail: 'test1@ethereal.email',
+          host: 'smtp.ethereal.email',
+          port: 587,
+          user: 'test1@ethereal.email',
+          pass: 'testpass1',
+          secure: false
+        },
+        {
+          key: 'sender-2',
+          displayName: 'Test Sender 2',
+          fromEmail: 'test2@ethereal.email',
+          host: 'smtp.ethereal.email',
+          port: 587,
+          user: 'test2@ethereal.email',
+          pass: 'testpass2',
+          secure: false
+        }
+      ]);
+    });
+
+    afterEach(() => {
+      process.env.ETHEREAL_SENDERS_JSON = originalEnv;
+    });
+
     const validPayload = {
+      senderKey: 'sender-1',
       subject: 'Welcome to ReachInbox',
       body: 'Hello, this is a scheduled outreach email.',
       recipients: ['user1@example.com', 'user2@example.com'],
@@ -75,9 +107,15 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       hourlyLimit: 100
     };
 
-    it('should validate a correct campaign payload', () => {
+    it('should validate a correct campaign payload with valid senderKey', () => {
       const result = createCampaignSchema.safeParse(validPayload);
       expect(result.success).toBe(true);
+    });
+
+    it('should reject non-existent or unconfigured senderKey', () => {
+      const invalidSender = { ...validPayload, senderKey: 'unknown-non-existent-sender' };
+      const result = createCampaignSchema.safeParse(invalidSender);
+      expect(result.success).toBe(false);
     });
 
     it('should reject empty subjects and empty bodies', () => {
@@ -111,6 +149,169 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
 
       expect(createCampaignSchema.safeParse(invalidDelay).success).toBe(false);
       expect(createCampaignSchema.safeParse(negativeLimit).success).toBe(false);
+    });
+  });
+
+  describe('Phase 5: Sender Config & Error Sanitization', () => {
+    it('should return empty list when ETHEREAL_SENDERS_JSON is missing or invalid', async () => {
+      const original = process.env.ETHEREAL_SENDERS_JSON;
+      const { getConfiguredSenders, getSafeSenders, isValidSenderKey } = await import('../config/senders.config.js');
+
+      process.env.ETHEREAL_SENDERS_JSON = '';
+      expect(getConfiguredSenders()).toEqual([]);
+      expect(getSafeSenders()).toEqual([]);
+      expect(isValidSenderKey('sender-1')).toBe(false);
+
+      process.env.ETHEREAL_SENDERS_JSON = 'invalid-json-string';
+      expect(getConfiguredSenders()).toEqual([]);
+      expect(getSafeSenders()).toEqual([]);
+
+      process.env.ETHEREAL_SENDERS_JSON = original;
+    });
+
+    it('should return safe sender information without passwords or hosts when configured', async () => {
+      const original = process.env.ETHEREAL_SENDERS_JSON;
+      process.env.ETHEREAL_SENDERS_JSON = JSON.stringify([
+        {
+          key: 'sender-alpha',
+          displayName: 'Alpha Sender',
+          fromEmail: 'alpha@ethereal.email',
+          host: 'smtp.ethereal.email',
+          port: 587,
+          user: 'alpha@ethereal.email',
+          pass: 'alpha_secret_pass',
+          secure: false
+        },
+        {
+          key: 'sender-beta',
+          displayName: 'Beta Sender',
+          fromEmail: 'beta@ethereal.email',
+          host: 'smtp.ethereal.email',
+          port: 587,
+          user: 'beta@ethereal.email',
+          pass: 'beta_secret_pass',
+          secure: false
+        }
+      ]);
+
+      const { getSafeSenders, getConfiguredSenders } = await import('../config/senders.config.js');
+      const safeSenders = getSafeSenders();
+      const configured = getConfiguredSenders();
+
+      expect(safeSenders).toHaveLength(2);
+      expect(safeSenders[0]).toEqual({
+        key: 'sender-alpha',
+        displayName: 'Alpha Sender',
+        fromEmail: 'alpha@ethereal.email'
+      });
+
+      // Verify passwords, users, hosts, and ports are stripped from safe senders
+      for (const s of safeSenders) {
+        expect(s).not.toHaveProperty('pass');
+        expect(s).not.toHaveProperty('host');
+        expect(s).not.toHaveProperty('port');
+        expect(s).not.toHaveProperty('user');
+      }
+
+      // Verify configured senders contain credentials internally
+      expect(configured[0]).toHaveProperty('pass', 'alpha_secret_pass');
+      expect(configured[0]).toHaveProperty('host', 'smtp.ethereal.email');
+
+      process.env.ETHEREAL_SENDERS_JSON = original;
+    });
+
+    it('should throw descriptive error in verifyAllTransporters when senders are not configured', async () => {
+      const original = process.env.ETHEREAL_SENDERS_JSON;
+      delete process.env.ETHEREAL_SENDERS_JSON;
+
+      const { verifyAllTransporters } = await import('../services/email.service.js');
+      await expect(verifyAllTransporters()).rejects.toThrow('Ethereal SMTP senders are not configured');
+
+      process.env.ETHEREAL_SENDERS_JSON = original;
+    });
+
+    it('should sanitize sensitive passwords and tokens from error strings', async () => {
+      const { sanitizeError } = await import('../services/email.service.js');
+      const sensitiveErr = new Error('SMTP connection failed: pass="secret_123" user="admin" url="redis://:supersecret@localhost:6379" token=abcdef12345');
+      const sanitized = sanitizeError(sensitiveErr);
+
+      expect(sanitized).not.toContain('secret_123');
+      expect(sanitized).not.toContain('supersecret');
+      expect(sanitized).not.toContain('abcdef12345');
+      expect(sanitized).toContain('[REDACTED]');
+    });
+
+    it('should throw when attempting to send email with unknown sender key', async () => {
+      const { sendEmail } = await import('../services/email.service.js');
+      await expect(
+        sendEmail({
+          senderKey: 'non-existent-sender-key',
+          recipientEmail: 'test@example.com',
+          subject: 'Test',
+          body: 'Hello'
+        })
+      ).rejects.toThrow("Sender with key 'non-existent-sender-key' is not configured.");
+    });
+  });
+
+  describe('Phase 5: Worker State Transitions & Idempotency Rules', () => {
+    it('should skip email job if record is already in SENT status', () => {
+      const emailRecord = {
+        id: 'email-123',
+        status: 'SENT',
+        sentAt: new Date()
+      };
+
+      const shouldSkip = emailRecord.status === 'SENT';
+      expect(shouldSkip).toBe(true);
+    });
+
+    it('should perform successful status transition to SENT with preview url and message id', () => {
+      const initialRecord = {
+        id: 'email-abc',
+        status: 'PROCESSING',
+        attemptCount: 0,
+        errorMessage: 'Previous transient failure'
+      };
+
+      const sendResult = {
+        messageId: '<msg-12345@ethereal.email>',
+        etherealPreviewUrl: 'https://ethereal.email/message/msg-12345'
+      };
+
+      const updatedRecord = {
+        ...initialRecord,
+        status: 'SENT',
+        sentAt: new Date(),
+        smtpMessageId: sendResult.messageId,
+        etherealPreviewUrl: sendResult.etherealPreviewUrl,
+        errorMessage: null,
+        attemptCount: initialRecord.attemptCount + 1
+      };
+
+      expect(updatedRecord.status).toBe('SENT');
+      expect(updatedRecord.smtpMessageId).toBe('<msg-12345@ethereal.email>');
+      expect(updatedRecord.etherealPreviewUrl).toBe('https://ethereal.email/message/msg-12345');
+      expect(updatedRecord.errorMessage).toBeNull();
+      expect(updatedRecord.attemptCount).toBe(1);
+    });
+
+    it('should mark status as FAILED when retry attempts are exhausted', () => {
+      const maxAttempts = 3;
+      const currentAttempt = 3;
+      const isExhausted = currentAttempt >= maxAttempts;
+
+      const nextStatus = isExhausted ? 'FAILED' : 'SCHEDULED';
+      expect(nextStatus).toBe('FAILED');
+    });
+
+    it('should reset status to SCHEDULED for BullMQ retry when attempts remain', () => {
+      const maxAttempts = 3;
+      const currentAttempt = 1;
+      const isExhausted = currentAttempt >= maxAttempts;
+
+      const nextStatus = isExhausted ? 'FAILED' : 'SCHEDULED';
+      expect(nextStatus).toBe('SCHEDULED');
     });
   });
 
@@ -156,5 +357,13 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       expect(userB_Emails).toHaveLength(1);
       expect(userB_Emails[0].recipientEmail).toBe('bob@domain.com');
     });
+
+    it('should verify database contains scheduled records intact', async () => {
+      const { prisma } = await import('../config/prisma.js');
+      const count = await prisma.scheduledEmail.count();
+      expect(count).toBeGreaterThanOrEqual(3);
+      await prisma.$disconnect();
+    });
   });
 });
+

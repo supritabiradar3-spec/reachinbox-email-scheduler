@@ -12,7 +12,8 @@ import {
   ChevronDown, 
   ChevronUp, 
   SendHorizontal,
-  Loader2
+  Loader2,
+  Send
 } from 'lucide-react';
 import { parseRecipientFile, ParseResult } from '../utils/recipientParser';
 
@@ -22,7 +23,18 @@ interface ComposeModalProps {
   onSuccess: () => void;
 }
 
+interface SenderOption {
+  key: string;
+  displayName: string;
+  fromEmail: string;
+}
+
 export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps): React.JSX.Element | null {
+  // Senders State
+  const [senders, setSenders] = useState<SenderOption[]>([]);
+  const [selectedSenderKey, setSelectedSenderKey] = useState<string>('');
+  const [loadingSenders, setLoadingSenders] = useState<boolean>(false);
+
   // Form States
   const [subject, setSubject] = useState<string>('');
   const [body, setBody] = useState<string>('');
@@ -45,9 +57,21 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
   // File Input Ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Set default start time to 5 minutes from now and generate idempotency key
+  // Fetch senders list when modal opens
   useEffect(() => {
     if (isOpen) {
+      setLoadingSenders(true);
+      fetch('/api/senders', { credentials: 'include' })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.senders && Array.isArray(data.senders) && data.senders.length > 0) {
+            setSenders(data.senders);
+            setSelectedSenderKey((prev) => prev || data.senders[0].key);
+          }
+        })
+        .catch((err) => console.warn('Failed to fetch senders:', err))
+        .finally(() => setLoadingSenders(false));
+
       const now = new Date();
       now.setMinutes(now.getMinutes() + 5);
       const localISO = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
@@ -118,11 +142,13 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
   const isStartTimeValid = Boolean(startTime && !isNaN(new Date(startTime).getTime()) && new Date(startTime).getTime() > Date.now() - 60000);
   const isDelayValid = delaySeconds > 0 && !isNaN(delaySeconds);
   const isHourlyLimitValid = hourlyLimit >= 1 && Number.isInteger(Number(hourlyLimit));
+  const hasSender = Boolean(selectedSenderKey && selectedSenderKey.trim().length > 0);
   const hasSubject = subject.trim().length > 0;
   const hasBody = body.trim().length > 0;
   const hasValidRecipients = (parseResult?.valid.length ?? 0) > 0;
 
-  const isFormValid = hasSubject && 
+  const isFormValid = hasSender &&
+    hasSubject && 
     hasBody && 
     hasValidRecipients && 
     isStartTimeValid && 
@@ -147,6 +173,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
         },
         credentials: 'include',
         body: JSON.stringify({
+          senderKey: selectedSenderKey,
           subject: subject.trim(),
           body: body.trim(),
           recipients: parseResult.valid,
@@ -185,7 +212,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/80">
           <div>
             <h2 className="text-lg font-bold text-white tracking-tight">Compose New Email</h2>
-            <p className="text-xs text-slate-400">Configure scheduling parameters and upload recipients</p>
+            <p className="text-xs text-slate-400">Configure sender account, timing, and recipient list</p>
           </div>
           <button
             onClick={onClose}
@@ -210,6 +237,32 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
               </div>
             </div>
           )}
+
+          {/* Sender Account Selection */}
+          <div className="space-y-1.5">
+            <label htmlFor="sender-account-select" className="block text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center space-x-1">
+              <Send className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Sender Account <span className="text-rose-400">*</span></span>
+            </label>
+            <select
+              id="sender-account-select"
+              required
+              value={selectedSenderKey}
+              onChange={(e) => setSelectedSenderKey(e.target.value)}
+              disabled={loadingSenders || isSubmitting}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition disabled:opacity-60"
+            >
+              {senders.length === 0 ? (
+                <option value="">{loadingSenders ? 'Loading configured senders...' : 'No sender accounts available'}</option>
+              ) : (
+                senders.map((sender) => (
+                  <option key={sender.key} value={sender.key}>
+                    {sender.displayName} ({sender.fromEmail})
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
 
           {/* Subject Field */}
           <div className="space-y-1.5">

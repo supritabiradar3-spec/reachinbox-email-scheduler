@@ -10,7 +10,8 @@ import {
   CalendarClock, 
   Inbox,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  ExternalLink
 } from 'lucide-react';
 import { ComposeModal } from './components/ComposeModal';
 
@@ -22,6 +23,7 @@ interface AuthUser {
 
 interface ScheduledEmailItem {
   id: string;
+  senderKey?: string;
   recipientEmail: string;
   subject: string;
   scheduledAt: string;
@@ -30,10 +32,13 @@ interface ScheduledEmailItem {
 
 interface SentEmailItem {
   id: string;
+  senderKey?: string;
   recipientEmail: string;
   subject: string;
   sentAt: string | null;
   status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED';
+  smtpMessageId?: string | null;
+  etherealPreviewUrl?: string | null;
 }
 
 interface PaginationMeta {
@@ -564,6 +569,7 @@ export default function App(): React.JSX.Element {
                             <thead className="bg-slate-900/90 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                               <tr>
                                 <th scope="col" className="py-3 px-4 font-semibold">Recipient</th>
+                                <th scope="col" className="py-3 px-4 font-semibold">Sender</th>
                                 <th scope="col" className="py-3 px-4 font-semibold">Subject</th>
                                 <th scope="col" className="py-3 px-4 font-semibold">Scheduled Time</th>
                                 <th scope="col" className="py-3 px-4 font-semibold text-right">Status</th>
@@ -573,6 +579,11 @@ export default function App(): React.JSX.Element {
                               {scheduledEmails.map((item) => (
                                 <tr key={item.id} className="hover:bg-slate-900/40 transition">
                                   <td className="py-3 px-4 font-medium text-white">{item.recipientEmail}</td>
+                                  <td className="py-3 px-4 text-slate-400">
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-800 text-[11px] text-slate-300 font-mono">
+                                      {item.senderKey || 'sender-1'}
+                                    </span>
+                                  </td>
                                   <td className="py-3 px-4 text-slate-300 max-w-xs truncate">{item.subject}</td>
                                   <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                                     {formatDateTime(item.scheduledAt)}
@@ -656,21 +667,44 @@ export default function App(): React.JSX.Element {
                             <thead className="bg-slate-900/90 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                               <tr>
                                 <th scope="col" className="py-3 px-4 font-semibold">Recipient</th>
+                                <th scope="col" className="py-3 px-4 font-semibold">Sender</th>
                                 <th scope="col" className="py-3 px-4 font-semibold">Subject</th>
                                 <th scope="col" className="py-3 px-4 font-semibold">Dispatched Time</th>
-                                <th scope="col" className="py-3 px-4 font-semibold text-right">Status</th>
+                                <th scope="col" className="py-3 px-4 font-semibold">Status</th>
+                                <th scope="col" className="py-3 px-4 font-semibold text-right">Preview</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-800/60">
                               {sentEmails.map((item) => (
                                 <tr key={item.id} className="hover:bg-slate-900/40 transition">
                                   <td className="py-3 px-4 font-medium text-white">{item.recipientEmail}</td>
+                                  <td className="py-3 px-4 text-slate-400">
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-800 text-[11px] text-slate-300 font-mono">
+                                      {item.senderKey || 'sender-1'}
+                                    </span>
+                                  </td>
                                   <td className="py-3 px-4 text-slate-300 max-w-xs truncate">{item.subject}</td>
                                   <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                                     {formatDateTime(item.sentAt)}
                                   </td>
-                                  <td className="py-3 px-4 text-right">
+                                  <td className="py-3 px-4">
                                     <StatusBadge status={item.status} />
+                                  </td>
+                                  <td className="py-3 px-4 text-right">
+                                    {item.etherealPreviewUrl ? (
+                                      <a
+                                        href={item.etherealPreviewUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md bg-indigo-950/80 text-indigo-300 hover:text-indigo-100 hover:bg-indigo-900 border border-indigo-700/50 text-[11px] transition"
+                                        title="Open Ethereal Email Preview"
+                                      >
+                                        <span>View</span>
+                                        <ExternalLink className="w-3 h-3" />
+                                      </a>
+                                    ) : (
+                                      <span className="text-slate-600 text-[11px]">—</span>
+                                    )}
                                   </td>
                                 </tr>
                               ))}
@@ -730,7 +764,7 @@ export default function App(): React.JSX.Element {
 
       {/* Footer */}
       <footer className="border-t border-slate-800/70 bg-slate-950 py-4 mt-auto text-center text-xs text-slate-500">
-        ReachInbox Email Scheduler • Phase 4 Persistent Email Scheduling
+        ReachInbox Email Scheduler • Phase 5 BullMQ Worker &amp; Ethereal SMTP
       </footer>
     </div>
   );

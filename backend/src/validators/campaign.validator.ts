@@ -1,8 +1,16 @@
 import { z } from 'zod';
+import { isValidSenderKey } from '../config/senders.config.js';
 
 const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
 export const createCampaignSchema = z.object({
+  senderKey: z
+    .string()
+    .trim()
+    .min(1, 'Sender account selection is required')
+    .refine((val) => isValidSenderKey(val), {
+      message: 'Selected sender account is invalid or not configured'
+    }),
   subject: z
     .string()
     .trim()

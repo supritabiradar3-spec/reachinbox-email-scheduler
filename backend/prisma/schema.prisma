@@ -32,6 +32,7 @@ model User {
 model EmailCampaign {
   id             String   @id @default(uuid())
   userId         String   @map("user_id")
+  senderKey      String   @default("sender-1") @map("sender_key")
   subject        String   @db.VarChar(255)
   body           String   @db.Text
   startTime      DateTime @map("start_time")
@@ -51,19 +52,22 @@ model EmailCampaign {
 }
 
 model ScheduledEmail {
-  id             String      @id @default(uuid())
-  campaignId     String      @map("campaign_id")
-  recipientEmail String      @map("recipient_email") @db.VarChar(255)
-  subject        String      @db.VarChar(255)
-  body           String      @db.Text
-  scheduledAt    DateTime    @map("scheduled_at")
-  sentAt         DateTime?   @map("sent_at")
-  status         EmailStatus @default(SCHEDULED)
-  bullmqJobId    String?     @unique @map("bullmq_job_id")
-  errorMessage   String?     @map("error_message") @db.Text
-  attemptCount   Int         @default(0) @map("attempt_count")
-  createdAt      DateTime    @default(now()) @map("created_at")
-  updatedAt      DateTime    @updatedAt @map("updated_at")
+  id                 String      @id @default(uuid())
+  campaignId         String      @map("campaign_id")
+  senderKey          String      @default("sender-1") @map("sender_key")
+  recipientEmail     String      @map("recipient_email") @db.VarChar(255)
+  subject            String      @db.VarChar(255)
+  body               String      @db.Text
+  scheduledAt        DateTime    @map("scheduled_at")
+  sentAt             DateTime?   @map("sent_at")
+  status             EmailStatus @default(SCHEDULED)
+  bullmqJobId        String?     @unique @map("bullmq_job_id")
+  smtpMessageId      String?     @map("smtp_message_id")
+  etherealPreviewUrl String?     @map("ethereal_preview_url") @db.Text
+  errorMessage       String?     @map("error_message") @db.Text
+  attemptCount       Int         @default(0) @map("attempt_count")
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
 
   campaign EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
