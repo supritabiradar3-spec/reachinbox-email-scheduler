@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Mail, 
   LogOut, 
@@ -8,10 +8,16 @@ import {
   Clock, 
   Send, 
   CalendarClock, 
-  Inbox,
-  ChevronLeft,
-  ChevronRight,
-  ExternalLink
+  Inbox, 
+  ChevronLeft, 
+  ChevronRight, 
+  ExternalLink, 
+  Search, 
+  X, 
+  CheckCircle2, 
+  AlertTriangle, 
+  Users,
+  RotateCcw
 } from 'lucide-react';
 import { ComposeModal } from './components/ComposeModal';
 
@@ -21,13 +27,19 @@ interface AuthUser {
   avatarUrl: string | null;
 }
 
+interface SenderOption {
+  key: string;
+  displayName: string;
+  fromEmail: string;
+}
+
 interface ScheduledEmailItem {
   id: string;
   senderKey?: string;
   recipientEmail: string;
   subject: string;
   scheduledAt: string;
-  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED';
+  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED' | string;
 }
 
 interface SentEmailItem {
@@ -36,9 +48,10 @@ interface SentEmailItem {
   recipientEmail: string;
   subject: string;
   sentAt: string | null;
-  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED';
+  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED' | string;
   smtpMessageId?: string | null;
   etherealPreviewUrl?: string | null;
+  snippet?: string | null;
 }
 
 interface PaginationMeta {
@@ -90,37 +103,37 @@ function StatusBadge({ status }: { status: string }): React.JSX.Element {
   switch (status) {
     case 'SCHEDULED':
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-950/80 text-indigo-300 border border-indigo-700/50">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-indigo-950/90 text-indigo-300 border border-indigo-700/60 shadow-sm">
           Scheduled
         </span>
       );
     case 'PROCESSING':
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-950/80 text-amber-300 border border-amber-700/50 animate-pulse">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-950/90 text-amber-300 border border-amber-700/60 animate-pulse shadow-sm">
           Processing
         </span>
       );
     case 'SENT':
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-700/50">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-950/90 text-emerald-300 border border-emerald-700/60 shadow-sm">
           Sent
         </span>
       );
     case 'FAILED':
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-950/80 text-rose-300 border border-rose-700/50">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-rose-950/90 text-rose-300 border border-rose-700/60 shadow-sm">
           Failed
         </span>
       );
     case 'RATE_LIMITED':
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-950/80 text-violet-300 border border-violet-700/50">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-orange-950/90 text-orange-300 border border-orange-700/60 shadow-sm">
           Rate Limited
         </span>
       );
     default:
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-800 text-slate-300 border border-slate-700">
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-800 text-slate-300 border border-slate-700">
           {status}
         </span>
       );
@@ -157,6 +170,10 @@ export default function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<'scheduled' | 'sent'>('scheduled');
   const [isComposeOpen, setIsComposeOpen] = useState<boolean>(false);
 
+  // Senders State
+  const [senders, setSenders] = useState<SenderOption[]>([]);
+  const [sendersLoading, setSendersLoading] = useState<boolean>(false);
+
   // Scheduled Emails State
   const [scheduledEmails, setScheduledEmails] = useState<ScheduledEmailItem[]>([]);
   const [scheduledPagination, setScheduledPagination] = useState<PaginationMeta>({
@@ -178,6 +195,10 @@ export default function App(): React.JSX.Element {
   });
   const [sentLoading, setSentLoading] = useState<boolean>(false);
   const [sentError, setSentError] = useState<string | null>(null);
+
+  // Search State
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [activeSearch, setActiveSearch] = useState<string>('');
 
   // Check Current Authentication State
   const checkAuth = async () => {
@@ -201,6 +222,38 @@ export default function App(): React.JSX.Element {
     } finally {
       setAuthChecking(false);
     }
+  };
+
+  // Fetch Configured Senders for Friendly Display Names
+  const fetchSenders = useCallback(async () => {
+    setSendersLoading(true);
+    try {
+      const response = await fetch('/api/senders', { credentials: 'include' });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.senders && Array.isArray(data.senders)) {
+          setSenders(data.senders);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load sender definitions:', err);
+    } finally {
+      setSendersLoading(false);
+    }
+  }, []);
+
+  // Senders Map: senderKey -> displayName
+  const senderMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const sender of senders) {
+      map[sender.key] = sender.displayName;
+    }
+    return map;
+  }, [senders]);
+
+  const getFriendlySenderName = (key?: string): string => {
+    if (!key) return 'ReachInbox Sender';
+    return senderMap[key] || key;
   };
 
   // Fetch Scheduled Emails
@@ -255,6 +308,65 @@ export default function App(): React.JSX.Element {
     }
   }, []);
 
+  // Execute Search via Elasticsearch
+  const executeSearch = useCallback(async (query: string, page: number = 1) => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setActiveSearch('');
+      fetchSentEmails(1);
+      return;
+    }
+
+    setSentLoading(true);
+    setSentError(null);
+    setActiveSearch(trimmed);
+
+    try {
+      const response = await fetch(`/api/emails/search?q=${encodeURIComponent(trimmed)}&page=${page}&limit=10`, {
+        credentials: 'include'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setSentEmails(data.emails || []);
+        setSentPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+      } else if (response.status === 401) {
+        setUser(null);
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        setSentError(errorData.message || 'Search request failed');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error executing search';
+      setSentError(msg);
+    } finally {
+      setSentLoading(false);
+    }
+  }, [fetchSentEmails]);
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setActiveSearch('');
+    fetchSentEmails(1);
+  };
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    executeSearch(searchQuery, 1);
+  };
+
+  const handleRefreshAll = () => {
+    fetchSenders();
+    if (activeTab === 'scheduled') {
+      fetchScheduledEmails(scheduledPagination.page || 1);
+    } else {
+      if (activeSearch) {
+        executeSearch(activeSearch, sentPagination.page || 1);
+      } else {
+        fetchSentEmails(sentPagination.page || 1);
+      }
+    }
+  };
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const errorParam = params.get('auth_error');
@@ -270,16 +382,17 @@ export default function App(): React.JSX.Element {
     checkAuth();
   }, []);
 
-  // Fetch data when authenticated user is detected or active tab changes
+  // Fetch data and senders when authenticated user is present
   useEffect(() => {
     if (user) {
+      fetchSenders();
       if (activeTab === 'scheduled') {
         fetchScheduledEmails(1);
       } else {
         fetchSentEmails(1);
       }
     }
-  }, [user, activeTab, fetchScheduledEmails, fetchSentEmails]);
+  }, [user, activeTab, fetchSenders, fetchScheduledEmails, fetchSentEmails]);
 
   const handleGoogleLogin = () => {
     setRedirectingToGoogle(true);
@@ -309,6 +422,7 @@ export default function App(): React.JSX.Element {
   const handleCampaignCreated = () => {
     setActiveTab('scheduled');
     fetchScheduledEmails(1);
+    fetchSenders();
   };
 
   // Initial loading screen
@@ -326,35 +440,35 @@ export default function App(): React.JSX.Element {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Navigation Header */}
-      <header className="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30">
+      {/* 1. PROFESSIONAL HEADER */}
+      <header className="border-b border-slate-800/80 bg-slate-900/70 backdrop-blur-md sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           
           {/* Logo & Title */}
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 flex items-center justify-center shadow-md shadow-indigo-500/20">
               <Mail className="w-5 h-5 text-white" />
             </div>
             <div>
-              <span className="font-bold text-lg text-white tracking-tight">ReachInbox</span>
-              <p className="text-xs text-slate-400">Email Scheduler</p>
+              <span className="font-bold text-base sm:text-lg text-white tracking-tight">ReachInbox</span>
+              <p className="text-[11px] text-slate-400 -mt-0.5">Email Scheduler</p>
             </div>
           </div>
 
           {/* User Profile & Logout */}
           {user && (
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-3 sm:space-x-4">
+              <div className="flex items-center space-x-2.5">
                 <UserAvatar 
                   name={user.name} 
                   email={user.email} 
                   avatarUrl={user.avatarUrl} 
                   size="sm" 
                 />
-                <div className="hidden sm:block text-left">
-                  <p className="text-xs font-semibold text-slate-200">{user.name || user.email}</p>
-                  <p className="text-[11px] text-slate-400">{user.email}</p>
+                <div className="text-left">
+                  <p className="text-xs font-semibold text-slate-200 truncate max-w-[100px] sm:max-w-[160px]">{user.name || user.email}</p>
+                  <p className="text-[11px] text-slate-400 truncate max-w-[160px] hidden sm:block">{user.email}</p>
                 </div>
               </div>
 
@@ -362,10 +476,12 @@ export default function App(): React.JSX.Element {
                 onClick={handleLogout}
                 disabled={loggingOut}
                 id="logout-btn"
-                className="inline-flex items-center space-x-2 px-3.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700 transition disabled:opacity-50"
+                className="inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700/80 transition disabled:opacity-50 active:scale-[0.98]"
+                title="Sign out of your account"
+                aria-label="Sign out of your account"
               >
                 <LogOut className="w-3.5 h-3.5" />
-                <span>{loggingOut ? 'Signing out...' : 'Sign Out'}</span>
+                <span className="hidden sm:inline">{loggingOut ? 'Signing out...' : 'Sign Out'}</span>
               </button>
             </div>
           )}
@@ -374,12 +490,12 @@ export default function App(): React.JSX.Element {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 flex flex-col">
         
-        {/* Unauthenticated View: Clean Login Page */}
+        {/* Unauthenticated View: Clean Login Card */}
         {!user ? (
           <div className="max-w-md w-full mx-auto my-auto space-y-6">
-            <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 backdrop-blur-md p-8 shadow-2xl space-y-6">
+            <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/80 backdrop-blur-md p-8 shadow-2xl space-y-6">
               <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
 
               <div className="text-center space-y-2">
@@ -435,37 +551,113 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
         ) : (
-          /* Authenticated Dashboard */
+          /* Authenticated SaaS Dashboard */
           <div className="space-y-6">
             
-            {/* Dashboard Action Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900/60 border border-slate-800 p-6 rounded-2xl">
-              <div>
-                <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-                  Email Scheduler Dashboard
-                </h1>
-                <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
-                  Compose, schedule batches, and monitor dispatch queues
-                </p>
-              </div>
+            {/* 2. COMPACT DASHBOARD HERO */}
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/30 to-slate-900 border border-slate-800/80 p-6 sm:p-7 shadow-lg">
+              <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="relative flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                    Email Scheduler Dashboard
+                  </h1>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                    Compose, schedule, and monitor your email campaigns
+                  </p>
+                </div>
 
-              {/* Primary "Compose New Email" Button */}
-              <button
-                id="compose-email-btn"
-                onClick={() => setIsComposeOpen(true)}
-                className="inline-flex items-center justify-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition active:scale-[0.98]"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Compose New Email</span>
-              </button>
+                {/* Primary Action Button */}
+                <button
+                  id="compose-email-btn"
+                  onClick={() => setIsComposeOpen(true)}
+                  className="inline-flex items-center justify-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-xs sm:text-sm shadow-lg shadow-indigo-600/25 transition active:scale-[0.98] shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Compose New Email</span>
+                </button>
+              </div>
             </div>
 
-            {/* Dashboard Tabs & Content Area */}
-            <div className="bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+            {/* 3. REAL SUMMARY CARDS */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+              
+              {/* Card 1: Scheduled Emails */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-indigo-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-indigo-500/40">
+                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                  <CalendarClock className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-slate-400 truncate">Scheduled Emails</p>
+                  {scheduledLoading && scheduledPagination.total === 0 ? (
+                    <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
+                  ) : (
+                    <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
+                      {scheduledPagination.total ?? '—'}
+                    </p>
+                  )}
+                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Awaiting queue dispatch</p>
+                </div>
+              </div>
+
+              {/* Card 2: Sent Emails */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-emerald-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-emerald-500/40">
+                <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-slate-400 truncate">Sent Emails</p>
+                  {sentLoading && sentPagination.total === 0 ? (
+                    <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
+                  ) : (
+                    <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
+                      {sentPagination.total ?? '—'}
+                    </p>
+                  )}
+                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Successfully delivered</p>
+                </div>
+              </div>
+
+              {/* Card 3: Failed Emails */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-rose-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-rose-500/40">
+                <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-slate-400 truncate">Failed Emails</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
+                    —
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Delivery errors</p>
+                </div>
+              </div>
+
+              {/* Card 4: Active Senders */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-cyan-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-cyan-500/40">
+                <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-slate-400 truncate">Active Senders</p>
+                  {sendersLoading && senders.length === 0 ? (
+                    <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
+                  ) : (
+                    <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
+                      {senders.length > 0 ? senders.length : '—'}
+                    </p>
+                  )}
+                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Configured accounts</p>
+                </div>
+              </div>
+
+            </div>
+
+            {/* 4. EMAIL MANAGEMENT PANEL */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl">
               
               {/* Tab Navigation and Controls */}
-              <div className="border-b border-slate-800 px-6 pt-4 flex items-center justify-between">
-                <div className="flex space-x-8">
+              <div className="border-b border-slate-800 px-4 sm:px-6 pt-3 flex items-center justify-between bg-slate-900/80">
+                <div className="flex space-x-6 sm:space-x-8">
                   <button
                     id="tab-scheduled-emails"
                     onClick={() => setActiveTab('scheduled')}
@@ -475,13 +667,15 @@ export default function App(): React.JSX.Element {
                         : 'border-transparent text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <CalendarClock className="w-4 h-4" />
+                    <Clock className="w-4 h-4" />
                     <span>Scheduled Emails</span>
-                    {scheduledPagination.total > 0 && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-800">
-                        {scheduledPagination.total}
-                      </span>
-                    )}
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                      activeTab === 'scheduled'
+                        ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}>
+                      {scheduledPagination.total}
+                    </span>
                   </button>
 
                   <button
@@ -495,29 +689,27 @@ export default function App(): React.JSX.Element {
                   >
                     <Send className="w-4 h-4" />
                     <span>Sent Emails</span>
-                    {sentPagination.total > 0 && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
-                        {sentPagination.total}
-                      </span>
-                    )}
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                      activeTab === 'sent'
+                        ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}>
+                      {sentPagination.total}
+                    </span>
                   </button>
                 </div>
 
-                {/* Tab Refresh Button */}
+                {/* Accessible Compact Refresh Button */}
                 <button
-                  onClick={() => {
-                    if (activeTab === 'scheduled') {
-                      fetchScheduledEmails(scheduledPagination.page);
-                    } else {
-                      fetchSentEmails(sentPagination.page);
-                    }
-                  }}
+                  id="dashboard-refresh-btn"
+                  onClick={handleRefreshAll}
                   disabled={scheduledLoading || sentLoading}
-                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition disabled:opacity-50"
-                  title="Refresh list"
-                  aria-label="Refresh list"
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 mb-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium transition disabled:opacity-50"
+                  title="Refresh dashboard data"
+                  aria-label="Refresh dashboard data"
                 >
-                  <RefreshCw className={`w-4 h-4 ${scheduledLoading || sentLoading ? 'animate-spin text-indigo-400' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 ${scheduledLoading || sentLoading ? 'animate-spin text-indigo-400' : ''}`} />
+                  <span className="hidden sm:inline">Refresh</span>
                 </button>
               </div>
 
@@ -526,45 +718,59 @@ export default function App(): React.JSX.Element {
                 
                 {/* SCHEDULED EMAILS TAB */}
                 {activeTab === 'scheduled' && (
-                  <div>
+                  <div className="space-y-4">
+                    {/* Error Banner with Working Retry */}
                     {scheduledError && (
-                      <div className="mb-4 p-3 rounded-xl bg-rose-950/70 border border-rose-800/70 text-rose-300 text-xs flex items-center space-x-2">
-                        <AlertCircle className="w-4 h-4 shrink-0" />
-                        <span>{scheduledError}</span>
+                      <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/60 text-rose-300 text-xs flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                          <span>{scheduledError}</span>
+                        </div>
+                        <button
+                          onClick={() => fetchScheduledEmails(scheduledPagination.page)}
+                          className="inline-flex items-center space-x-1 px-2.5 py-1 bg-rose-900/60 hover:bg-rose-800 text-rose-200 rounded-lg text-xs font-medium border border-rose-700/50 transition"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Retry</span>
+                        </button>
                       </div>
                     )}
 
+                    {/* Loading State Skeleton */}
                     {scheduledLoading && scheduledEmails.length === 0 ? (
-                      <div className="py-12 flex flex-col items-center justify-center space-y-3">
-                        <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin" />
-                        <p className="text-xs text-slate-400">Loading scheduled emails...</p>
+                      <div className="py-4 space-y-2.5">
+                        <div className="h-10 bg-slate-900/80 rounded-xl border border-slate-800 animate-pulse"></div>
+                        <div className="h-12 bg-slate-900/50 rounded-xl border border-slate-800/60 animate-pulse"></div>
+                        <div className="h-12 bg-slate-900/50 rounded-xl border border-slate-800/60 animate-pulse"></div>
                       </div>
                     ) : scheduledEmails.length === 0 ? (
-                      /* Empty State */
-                      <div className="text-center space-y-4 max-w-md mx-auto py-8">
-                        <div className="w-12 h-12 mx-auto rounded-2xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400">
-                          <Clock className="w-6 h-6" />
+                      /* 8. Scheduled Empty State */
+                      <div className="text-center space-y-2.5 max-w-sm mx-auto py-5 sm:py-6">
+                        <div className="w-10 h-10 mx-auto rounded-xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400 shadow-sm">
+                          <Clock className="w-5 h-5" />
                         </div>
-                        <div className="space-y-1.5">
-                          <h3 className="text-base font-semibold text-white">No Scheduled Emails</h3>
+                        <div className="space-y-1">
+                          <h3 className="text-sm sm:text-base font-semibold text-white">Your schedule is clear</h3>
                           <p className="text-xs text-slate-400">
-                            You have no emails waiting in the schedule queue. Click "Compose New Email" to set up your next email campaign.
+                            Create a campaign to schedule your next batch of emails.
                           </p>
                         </div>
-                        <div className="pt-2">
+                        <div className="pt-1.5">
                           <button
                             onClick={() => setIsComposeOpen(true)}
-                            className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium border border-slate-700 transition"
+                            className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98]"
                           >
                             <Plus className="w-3.5 h-3.5" />
-                            <span>Schedule Your First Email</span>
+                            <span>Compose New Email</span>
                           </button>
                         </div>
                       </div>
                     ) : (
-                      /* Scheduled Emails Table */
+                      /* Scheduled Emails View */
                       <div className="space-y-4">
-                        <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
+                        
+                        {/* 6. Desktop Table Layout */}
+                        <div className="hidden md:block overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
                           <table className="w-full text-left text-xs text-slate-300">
                             <thead className="bg-slate-900/90 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                               <tr>
@@ -577,14 +783,18 @@ export default function App(): React.JSX.Element {
                             </thead>
                             <tbody className="divide-y divide-slate-800/60">
                               {scheduledEmails.map((item) => (
-                                <tr key={item.id} className="hover:bg-slate-900/40 transition">
-                                  <td className="py-3 px-4 font-medium text-white">{item.recipientEmail}</td>
-                                  <td className="py-3 px-4 text-slate-400">
-                                    <span className="px-2 py-0.5 rounded-md bg-slate-800 text-[11px] text-slate-300 font-mono">
-                                      {item.senderKey || 'sender-1'}
+                                <tr key={item.id} className="hover:bg-slate-900/50 transition">
+                                  <td className="py-3 px-4 font-medium text-white max-w-[200px] truncate" title={item.recipientEmail}>
+                                    {item.recipientEmail}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-800/90 text-[11px] text-slate-200 border border-slate-700/60 font-medium">
+                                      {getFriendlySenderName(item.senderKey)}
                                     </span>
                                   </td>
-                                  <td className="py-3 px-4 text-slate-300 max-w-xs truncate">{item.subject}</td>
+                                  <td className="py-3 px-4 text-slate-300 max-w-xs truncate" title={item.subject}>
+                                    {item.subject}
+                                  </td>
                                   <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                                     {formatDateTime(item.scheduledAt)}
                                   </td>
@@ -597,9 +807,34 @@ export default function App(): React.JSX.Element {
                           </table>
                         </div>
 
+                        {/* 7. Mobile Stacked Cards Layout */}
+                        <div className="md:hidden space-y-3">
+                          {scheduledEmails.map((item) => (
+                            <div key={item.id} className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-white text-xs truncate" title={item.recipientEmail}>
+                                  {item.recipientEmail}
+                                </span>
+                                <StatusBadge status={item.status} />
+                              </div>
+                              <p className="text-xs text-slate-300 font-medium line-clamp-2" title={item.subject}>
+                                {item.subject}
+                              </p>
+                              <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
+                                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-medium">
+                                  {getFriendlySenderName(item.senderKey)}
+                                </span>
+                                <span className="font-mono text-[10px]">
+                                  {formatDateTime(item.scheduledAt)}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
                         {/* Pagination Footer */}
                         {scheduledPagination.totalPages > 1 && (
-                          <div className="flex items-center justify-between text-xs text-slate-400 px-2 pt-2">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-400 px-1 pt-2">
                             <span>
                               Showing {((scheduledPagination.page - 1) * scheduledPagination.limit) + 1} - {Math.min(scheduledPagination.page * scheduledPagination.limit, scheduledPagination.total)} of {scheduledPagination.total}
                             </span>
@@ -633,36 +868,135 @@ export default function App(): React.JSX.Element {
 
                 {/* SENT EMAILS TAB */}
                 {activeTab === 'sent' && (
-                  <div>
-                    {sentError && (
-                      <div className="mb-4 p-3 rounded-xl bg-rose-950/70 border border-rose-800/70 text-rose-300 text-xs flex items-center space-x-2">
-                        <AlertCircle className="w-4 h-4 shrink-0" />
-                        <span>{sentError}</span>
+                  <div className="space-y-4">
+                    {/* Full-Text Elasticsearch Search Bar */}
+                    <form onSubmit={handleSearchSubmit} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <div className="relative flex-1">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <Search className="w-4 h-4" />
+                        </div>
+                        <input
+                          id="sent-email-search-input"
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search sent emails by subject, body, or recipient..."
+                          className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition"
+                        />
+                        {searchQuery && (
+                          <button
+                            type="button"
+                            onClick={handleClearSearch}
+                            className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300"
+                            aria-label="Clear search input"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="submit"
+                          id="search-sent-btn"
+                          disabled={sentLoading || !searchQuery.trim()}
+                          className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Search</span>
+                        </button>
+                        {activeSearch && (
+                          <button
+                            type="button"
+                            onClick={handleClearSearch}
+                            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </form>
+
+                    {/* Active Search Filter Banner */}
+                    {activeSearch && (
+                      <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-indigo-950/40 border border-indigo-800/40 text-xs text-indigo-300">
+                        <div className="flex items-center space-x-2">
+                          <Search className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>
+                            Showing search results for: <strong className="text-white font-semibold">"{activeSearch}"</strong> ({sentPagination.total} {sentPagination.total === 1 ? 'match' : 'matches'})
+                          </span>
+                        </div>
+                        <button
+                          onClick={handleClearSearch}
+                          className="text-xs text-indigo-400 hover:text-indigo-200 underline"
+                        >
+                          Reset to all sent emails
+                        </button>
                       </div>
                     )}
 
+                    {/* Error Banner with Working Retry */}
+                    {sentError && (
+                      <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/60 text-rose-300 text-xs flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                          <span>{sentError}</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (activeSearch) {
+                              executeSearch(activeSearch, sentPagination.page);
+                            } else {
+                              fetchSentEmails(sentPagination.page);
+                            }
+                          }}
+                          className="inline-flex items-center space-x-1 px-2.5 py-1 bg-rose-900/60 hover:bg-rose-800 text-rose-200 rounded-lg text-xs font-medium border border-rose-700/50 transition"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Retry</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Loading State Skeleton */}
                     {sentLoading && sentEmails.length === 0 ? (
-                      <div className="py-12 flex flex-col items-center justify-center space-y-3">
-                        <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin" />
-                        <p className="text-xs text-slate-400">Loading sent emails...</p>
+                      <div className="py-4 space-y-2.5">
+                        <div className="h-10 bg-slate-900/80 rounded-xl border border-slate-800 animate-pulse"></div>
+                        <div className="h-12 bg-slate-900/50 rounded-xl border border-slate-800/60 animate-pulse"></div>
+                        <div className="h-12 bg-slate-900/50 rounded-xl border border-slate-800/60 animate-pulse"></div>
                       </div>
                     ) : sentEmails.length === 0 ? (
-                      /* Empty State */
-                      <div className="text-center space-y-4 max-w-md mx-auto py-8">
-                        <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-950/60 border border-emerald-800/40 flex items-center justify-center text-emerald-400">
-                          <Inbox className="w-6 h-6" />
+                      /* 8. Sent Empty State */
+                      <div className="text-center space-y-2.5 max-w-sm mx-auto py-5 sm:py-6">
+                        <div className="w-10 h-10 mx-auto rounded-xl bg-emerald-950/60 border border-emerald-800/40 flex items-center justify-center text-emerald-400 shadow-sm">
+                          <Inbox className="w-5 h-5" />
                         </div>
-                        <div className="space-y-1.5">
-                          <h3 className="text-base font-semibold text-white">No Sent Emails Yet</h3>
+                        <div className="space-y-1">
+                          <h3 className="text-sm sm:text-base font-semibold text-white">
+                            {activeSearch ? 'No matching sent emails' : 'No sent emails yet'}
+                          </h3>
                           <p className="text-xs text-slate-400">
-                            Dispatched emails and delivery logs will be listed here once the background worker processes scheduled jobs.
+                            {activeSearch 
+                              ? `No sent emails matched "${activeSearch}". Try refining your query or keywords.`
+                              : 'Successfully dispatched emails will appear here.'}
                           </p>
                         </div>
+                        {activeSearch && (
+                          <div className="pt-1.5">
+                            <button
+                              onClick={handleClearSearch}
+                              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium border border-slate-700 transition"
+                            >
+                              Clear Search Filter
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : (
-                      /* Sent Emails Table */
+                      /* Sent Emails View */
                       <div className="space-y-4">
-                        <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
+                        
+                        {/* 6. Desktop Table Layout */}
+                        <div className="hidden md:block overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
                           <table className="w-full text-left text-xs text-slate-300">
                             <thead className="bg-slate-900/90 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                               <tr>
@@ -676,14 +1010,23 @@ export default function App(): React.JSX.Element {
                             </thead>
                             <tbody className="divide-y divide-slate-800/60">
                               {sentEmails.map((item) => (
-                                <tr key={item.id} className="hover:bg-slate-900/40 transition">
-                                  <td className="py-3 px-4 font-medium text-white">{item.recipientEmail}</td>
-                                  <td className="py-3 px-4 text-slate-400">
-                                    <span className="px-2 py-0.5 rounded-md bg-slate-800 text-[11px] text-slate-300 font-mono">
-                                      {item.senderKey || 'sender-1'}
+                                <tr key={item.id} className="hover:bg-slate-900/50 transition">
+                                  <td className="py-3 px-4 font-medium text-white max-w-[180px] truncate" title={item.recipientEmail}>
+                                    {item.recipientEmail}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-800/90 text-[11px] text-slate-200 border border-slate-700/60 font-medium">
+                                      {getFriendlySenderName(item.senderKey)}
                                     </span>
                                   </td>
-                                  <td className="py-3 px-4 text-slate-300 max-w-xs truncate">{item.subject}</td>
+                                  <td className="py-3 px-4 text-slate-300 max-w-sm">
+                                    <p className="font-medium text-slate-200 truncate" title={item.subject}>{item.subject}</p>
+                                    {item.snippet && (
+                                      <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1 italic font-sans text-slate-400/90">
+                                        {item.snippet}
+                                      </p>
+                                    )}
+                                  </td>
                                   <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                                     {formatDateTime(item.sentAt)}
                                   </td>
@@ -696,7 +1039,7 @@ export default function App(): React.JSX.Element {
                                         href={item.etherealPreviewUrl}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md bg-indigo-950/80 text-indigo-300 hover:text-indigo-100 hover:bg-indigo-900 border border-indigo-700/50 text-[11px] transition"
+                                        className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md bg-indigo-950/80 text-indigo-300 hover:text-indigo-100 hover:bg-indigo-900 border border-indigo-700/50 text-[11px] transition shadow-sm"
                                         title="Open Ethereal Email Preview"
                                       >
                                         <span>View</span>
@@ -712,15 +1055,67 @@ export default function App(): React.JSX.Element {
                           </table>
                         </div>
 
+                        {/* 7. Mobile Stacked Cards Layout */}
+                        <div className="md:hidden space-y-3">
+                          {sentEmails.map((item) => (
+                            <div key={item.id} className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-white text-xs truncate" title={item.recipientEmail}>
+                                  {item.recipientEmail}
+                                </span>
+                                <StatusBadge status={item.status} />
+                              </div>
+                              <div>
+                                <p className="text-xs text-slate-200 font-medium line-clamp-2" title={item.subject}>
+                                  {item.subject}
+                                </p>
+                                {item.snippet && (
+                                  <p className="text-[11px] text-slate-400 mt-1 line-clamp-2 italic">
+                                    {item.snippet}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
+                                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-medium">
+                                  {getFriendlySenderName(item.senderKey)}
+                                </span>
+                                <div className="flex items-center space-x-2">
+                                  <span className="font-mono text-[10px]">
+                                    {formatDateTime(item.sentAt)}
+                                  </span>
+                                  {item.etherealPreviewUrl && (
+                                    <a
+                                      href={item.etherealPreviewUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center space-x-1 px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-700/50 text-[10px]"
+                                    >
+                                      <span>View</span>
+                                      <ExternalLink className="w-2.5 h-2.5" />
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
                         {/* Pagination Footer */}
                         {sentPagination.totalPages > 1 && (
-                          <div className="flex items-center justify-between text-xs text-slate-400 px-2 pt-2">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-400 px-1 pt-2">
                             <span>
                               Showing {((sentPagination.page - 1) * sentPagination.limit) + 1} - {Math.min(sentPagination.page * sentPagination.limit, sentPagination.total)} of {sentPagination.total}
                             </span>
                             <div className="flex items-center space-x-2">
                               <button
-                                onClick={() => fetchSentEmails(sentPagination.page - 1)}
+                                onClick={() => {
+                                  const prevPage = sentPagination.page - 1;
+                                  if (activeSearch) {
+                                    executeSearch(activeSearch, prevPage);
+                                  } else {
+                                    fetchSentEmails(prevPage);
+                                  }
+                                }}
                                 disabled={sentPagination.page <= 1 || sentLoading}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition"
                                 aria-label="Previous page"
@@ -731,7 +1126,14 @@ export default function App(): React.JSX.Element {
                                 Page {sentPagination.page} of {sentPagination.totalPages}
                               </span>
                               <button
-                                onClick={() => fetchSentEmails(sentPagination.page + 1)}
+                                onClick={() => {
+                                  const nextPage = sentPagination.page + 1;
+                                  if (activeSearch) {
+                                    executeSearch(activeSearch, nextPage);
+                                  } else {
+                                    fetchSentEmails(nextPage);
+                                  }
+                                }}
                                 disabled={sentPagination.page >= sentPagination.totalPages || sentLoading}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition"
                                 aria-label="Next page"
@@ -764,7 +1166,7 @@ export default function App(): React.JSX.Element {
 
       {/* Footer */}
       <footer className="border-t border-slate-800/70 bg-slate-950 py-4 mt-auto text-center text-xs text-slate-500">
-        ReachInbox Email Scheduler • Phase 5 BullMQ Worker &amp; Ethereal SMTP
+        ReachInbox Email Scheduler • Enterprise Edition
       </footer>
     </div>
   );
