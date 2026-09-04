@@ -201,6 +201,7 @@ export default function App(): React.JSX.Element {
   // Search State
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeSearch, setActiveSearch] = useState<string>('');
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   // Slack Integration State
   const [slackConnected, setSlackConnected] = useState<boolean>(false);
@@ -215,6 +216,27 @@ export default function App(): React.JSX.Element {
     const baseOrigin = apiUrl.replace(/\/api\/?$/, '').replace(/\/+$/, '');
     return `${baseOrigin}/admin/queues`;
   }, []);
+
+  // Time-based greeting and user first name
+  const greeting = useMemo(() => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 18) return 'Good afternoon';
+    return 'Good evening';
+  }, []);
+
+  const userFirstName = useMemo(() => {
+    if (!user) return '';
+    if (user.name) {
+      const first = user.name.trim().split(/\s+/)[0];
+      if (first) return first;
+    }
+    if (user.email) {
+      const prefix = user.email.split('@')[0];
+      return prefix.charAt(0).toUpperCase() + prefix.slice(1);
+    }
+    return '';
+  }, [user]);
 
   // Fetch Slack Connection Status
   const fetchSlackStatus = useCallback(async () => {
@@ -322,7 +344,7 @@ export default function App(): React.JSX.Element {
   };
 
   // Fetch Scheduled Emails
-  const fetchScheduledEmails = useCallback(async (page: number = 1) => {
+  const fetchScheduledEmails = useCallback(async (page: number = 1): Promise<boolean> => {
     setScheduledLoading(true);
     setScheduledError(null);
     try {
@@ -333,22 +355,26 @@ export default function App(): React.JSX.Element {
         const data = await response.json();
         setScheduledEmails(data.emails || []);
         setScheduledPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        return true;
       } else if (response.status === 401) {
         setUser(null);
+        return false;
       } else {
         const errorData = await response.json().catch(() => ({}));
         setScheduledError(errorData.message || 'Failed to load scheduled emails');
+        return false;
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Network error loading scheduled emails';
       setScheduledError(msg);
+      return false;
     } finally {
       setScheduledLoading(false);
     }
   }, []);
 
   // Fetch Sent Emails
-  const fetchSentEmails = useCallback(async (page: number = 1) => {
+  const fetchSentEmails = useCallback(async (page: number = 1): Promise<boolean> => {
     setSentLoading(true);
     setSentError(null);
     try {
@@ -359,27 +385,30 @@ export default function App(): React.JSX.Element {
         const data = await response.json();
         setSentEmails(data.emails || []);
         setSentPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        return true;
       } else if (response.status === 401) {
         setUser(null);
+        return false;
       } else {
         const errorData = await response.json().catch(() => ({}));
         setSentError(errorData.message || 'Failed to load sent emails');
+        return false;
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Network error loading sent emails';
       setSentError(msg);
+      return false;
     } finally {
       setSentLoading(false);
     }
   }, []);
 
   // Execute Search via Elasticsearch
-  const executeSearch = useCallback(async (query: string, page: number = 1) => {
+  const executeSearch = useCallback(async (query: string, page: number = 1): Promise<boolean> => {
     const trimmed = query.trim();
     if (!trimmed) {
       setActiveSearch('');
-      fetchSentEmails(1);
-      return;
+      return fetchSentEmails(1);
     }
 
     setSentLoading(true);
@@ -394,15 +423,19 @@ export default function App(): React.JSX.Element {
         const data = await response.json();
         setSentEmails(data.emails || []);
         setSentPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        return true;
       } else if (response.status === 401) {
         setUser(null);
+        return false;
       } else {
         const errorData = await response.json().catch(() => ({}));
         setSentError(errorData.message || 'Search request failed');
+        return false;
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Network error executing search';
       setSentError(msg);
+      return false;
     } finally {
       setSentLoading(false);
     }
@@ -419,14 +452,17 @@ export default function App(): React.JSX.Element {
     executeSearch(searchQuery, 1);
   };
 
-  const handleRefreshAll = () => {
+  const handleRefreshAll = async () => {
     fetchSenders();
     fetchSlackStatus();
-    fetchScheduledEmails(scheduledPagination.page || 1);
-    if (activeSearch) {
-      executeSearch(activeSearch, sentPagination.page || 1);
-    } else {
-      fetchSentEmails(sentPagination.page || 1);
+    const schedOk = await fetchScheduledEmails(scheduledPagination.page || 1);
+    const sentOk = activeSearch
+      ? await executeSearch(activeSearch, sentPagination.page || 1)
+      : await fetchSentEmails(sentPagination.page || 1);
+
+    if (schedOk && sentOk) {
+      const now = new Date();
+      setLastUpdated(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
     }
   };
 
@@ -462,8 +498,15 @@ export default function App(): React.JSX.Element {
     if (user) {
       fetchSenders();
       fetchSlackStatus();
-      fetchScheduledEmails(1);
-      fetchSentEmails(1);
+      Promise.all([
+        fetchScheduledEmails(1),
+        fetchSentEmails(1)
+      ]).then(([schedOk, sentOk]) => {
+        if (schedOk && sentOk) {
+          const now = new Date();
+          setLastUpdated(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        }
+      }).catch(() => {});
     }
   }, [user, fetchSenders, fetchSlackStatus, fetchScheduledEmails, fetchSentEmails]);
 
@@ -499,6 +542,7 @@ export default function App(): React.JSX.Element {
         setUser(null);
         setScheduledEmails([]);
         setSentEmails([]);
+        setLastUpdated(null);
       }
     } catch (err) {
       console.error('Logout failed:', err);
@@ -709,9 +753,13 @@ export default function App(): React.JSX.Element {
             
             {/* 2. COMPACT DASHBOARD HERO */}
             <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/30 to-slate-900 border border-slate-800/80 p-6 sm:p-7 shadow-lg">
-              <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" aria-hidden="true"></div>
               <div className="relative flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
+                  <p className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wider mb-1 flex items-center space-x-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" aria-hidden="true"></span>
+                    <span>{greeting}{userFirstName ? `, ${userFirstName}` : ''}</span>
+                  </p>
                   <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
                     Email Scheduler Dashboard
                   </h1>
@@ -724,11 +772,31 @@ export default function App(): React.JSX.Element {
                 <button
                   id="compose-email-btn"
                   onClick={() => setIsComposeOpen(true)}
-                  className="inline-flex items-center justify-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-xs sm:text-sm shadow-lg shadow-indigo-600/25 transition active:scale-[0.98] shrink-0"
+                  className="inline-flex items-center justify-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-xs sm:text-sm shadow-lg shadow-indigo-600/25 transition active:scale-[0.98] shrink-0 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
                 >
                   <Plus className="w-4 h-4" />
                   <span>Compose New Email</span>
                 </button>
+              </div>
+
+              {/* Operational Summary Row */}
+              <div className="mt-5 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-2 sm:gap-3 text-xs text-slate-400">
+                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" aria-hidden="true"></span>
+                  <span>{senders.length} {senders.length === 1 ? 'Sender' : 'Senders'} Configured</span>
+                </div>
+                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
+                  <span className={`w-1.5 h-1.5 rounded-full ${slackConnected ? 'bg-indigo-400' : 'bg-slate-500'}`} aria-hidden="true"></span>
+                  <span>{slackConnected ? `Slack Connected (${slackTeamName || 'Workspace'})` : 'Slack Not Connected'}</span>
+                </div>
+                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" aria-hidden="true"></span>
+                  <span>{scheduledPagination.total} Scheduled</span>
+                </div>
+                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" aria-hidden="true"></span>
+                  <span>{sentPagination.total} Sent</span>
+                </div>
               </div>
             </div>
 
@@ -736,7 +804,19 @@ export default function App(): React.JSX.Element {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
               
               {/* Card 1: Scheduled Emails */}
-              <div className="p-4 rounded-xl bg-slate-900/60 border border-indigo-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-indigo-500/40">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setActiveTab('scheduled')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveTab('scheduled');
+                  }
+                }}
+                aria-label={`View scheduled emails. Currently ${scheduledPagination.total} scheduled.`}
+                className="p-4 rounded-xl bg-slate-900/60 border border-indigo-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-indigo-500/40 cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none select-none"
+              >
                 <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                   <CalendarClock className="w-5 h-5" />
                 </div>
@@ -749,12 +829,24 @@ export default function App(): React.JSX.Element {
                       {scheduledPagination.total ?? '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Awaiting queue dispatch</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Awaiting queue dispatch</p>
                 </div>
               </div>
 
               {/* Card 2: Sent Emails */}
-              <div className="p-4 rounded-xl bg-slate-900/60 border border-emerald-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-emerald-500/40">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setActiveTab('sent')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveTab('sent');
+                  }
+                }}
+                aria-label={`View sent emails. Currently ${sentPagination.total} delivered.`}
+                className="p-4 rounded-xl bg-slate-900/60 border border-emerald-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-emerald-500/40 cursor-pointer focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none select-none"
+              >
                 <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
                   <CheckCircle2 className="w-5 h-5" />
                 </div>
@@ -767,21 +859,27 @@ export default function App(): React.JSX.Element {
                       {sentPagination.total ?? '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Successfully delivered</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Successfully delivered</p>
                 </div>
               </div>
 
               {/* Card 3: Failed Emails */}
-              <div className="p-4 rounded-xl bg-slate-900/60 border border-rose-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-rose-500/40">
+              <div
+                className="p-4 rounded-xl bg-slate-900/60 border border-rose-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-rose-500/40"
+                title="No failed deliveries currently reported by the dashboard"
+              >
                 <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
                   <AlertTriangle className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
                   <p className="text-xs font-medium text-slate-400 truncate">Failed Emails</p>
-                  <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
-                    —
+                  <p
+                    className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5"
+                    title="No failed deliveries currently reported by the dashboard"
+                  >
+                    0
                   </p>
-                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Delivery errors</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Delivery errors</p>
                 </div>
               </div>
 
@@ -799,14 +897,14 @@ export default function App(): React.JSX.Element {
                       {senders.length > 0 ? senders.length : '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-500 mt-0.5 truncate">Configured accounts</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Configured accounts</p>
                 </div>
               </div>
 
             </div>
 
             {/* 4. EMAIL MANAGEMENT PANEL */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl">
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl mt-6 md:mt-8">
               
               {/* Tab Navigation and Controls */}
               <div className="border-b border-slate-800 px-4 sm:px-6 pt-3 flex items-center justify-between bg-slate-900/80">
@@ -852,18 +950,25 @@ export default function App(): React.JSX.Element {
                   </button>
                 </div>
 
-                {/* Accessible Compact Refresh Button */}
-                <button
-                  id="dashboard-refresh-btn"
-                  onClick={handleRefreshAll}
-                  disabled={scheduledLoading || sentLoading || slackLoading}
-                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 mb-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium transition disabled:opacity-50"
-                  title="Refresh dashboard data"
-                  aria-label="Refresh dashboard data"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${scheduledLoading || sentLoading || slackLoading ? 'animate-spin text-indigo-400' : ''}`} />
-                  <span className="hidden sm:inline">Refresh</span>
-                </button>
+                {/* Accessible Compact Refresh Button & Last Updated Timestamp */}
+                <div className="flex items-center space-x-2.5 mb-2">
+                  {lastUpdated && (
+                    <span className="text-[11px] text-slate-400 hidden sm:inline select-none">
+                      Last updated: {lastUpdated}
+                    </span>
+                  )}
+                  <button
+                    id="dashboard-refresh-btn"
+                    onClick={handleRefreshAll}
+                    disabled={scheduledLoading || sentLoading || slackLoading}
+                    className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium transition disabled:opacity-50"
+                    title="Refresh dashboard data"
+                    aria-label="Refresh dashboard data"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${scheduledLoading || sentLoading || slackLoading ? 'animate-spin text-indigo-400' : ''}`} />
+                    <span className="hidden sm:inline">Refresh</span>
+                  </button>
+                </div>
               </div>
 
               {/* Tab Panels */}
@@ -898,25 +1003,72 @@ export default function App(): React.JSX.Element {
                       </div>
                     ) : scheduledEmails.length === 0 ? (
                       /* 8. Scheduled Empty State */
-                      <div className="text-center space-y-2.5 max-w-sm mx-auto py-5 sm:py-6">
-                        <div className="w-10 h-10 mx-auto rounded-xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400 shadow-sm">
-                          <Clock className="w-5 h-5" />
+                      <div className="py-5 sm:py-6 space-y-6">
+                        <div className="text-center space-y-2.5 max-w-sm mx-auto">
+                          <div className="w-10 h-10 mx-auto rounded-xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400 shadow-sm">
+                            <Clock className="w-5 h-5" />
+                          </div>
+                          <div className="space-y-1">
+                            <h3 className="text-sm sm:text-base font-semibold text-white">Your schedule is clear</h3>
+                            <p className="text-xs text-slate-400">
+                              Create a campaign to schedule your next batch of emails.
+                            </p>
+                          </div>
+                          <div className="pt-1.5">
+                            <button
+                              onClick={() => setIsComposeOpen(true)}
+                              className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Compose New Email</span>
+                            </button>
+                          </div>
                         </div>
-                        <div className="space-y-1">
-                          <h3 className="text-sm sm:text-base font-semibold text-white">Your schedule is clear</h3>
-                          <p className="text-xs text-slate-400">
-                            Create a campaign to schedule your next batch of emails.
-                          </p>
-                        </div>
-                        <div className="pt-1.5">
-                          <button
-                            onClick={() => setIsComposeOpen(true)}
-                            className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98]"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>Compose New Email</span>
-                          </button>
-                        </div>
+
+                        {/* Recent Delivery Activity (if sent records exist) */}
+                        {sentEmails.length > 0 && (
+                          <div className="pt-6 border-t border-slate-800/80 text-left max-w-2xl mx-auto space-y-3">
+                            <div className="flex items-center justify-between">
+                              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                                <Send className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>Recent Delivery Activity</span>
+                              </h4>
+                              <button
+                                onClick={() => setActiveTab('sent')}
+                                className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition focus-visible:ring-2 focus-visible:ring-indigo-500 rounded px-1 focus-visible:outline-none"
+                              >
+                                View all sent emails &rarr;
+                              </button>
+                            </div>
+
+                            <div className="space-y-2">
+                              {sentEmails.slice(0, 3).map((item) => (
+                                <div
+                                  key={`recent-${item.id}`}
+                                  className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-slate-200 font-medium truncate" title={item.subject}>
+                                      {item.subject}
+                                    </p>
+                                    <div className="flex items-center space-x-2 mt-0.5 text-[11px] text-slate-400">
+                                      <span className="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 font-medium text-[10px]">
+                                        {getFriendlySenderName(item.senderKey)}
+                                      </span>
+                                      <span className="text-slate-500" aria-hidden="true">•</span>
+                                      <span className="font-mono text-[10px]">
+                                        {formatDateTime(item.sentAt)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="self-start sm:self-center shrink-0">
+                                    <StatusBadge status={item.status} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       /* Scheduled Emails View */
