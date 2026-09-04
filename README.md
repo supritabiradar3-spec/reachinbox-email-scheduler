@@ -1,15 +1,428 @@
 # ReachInbox Email Scheduler
 
-A scalable background email scheduling and dispatching application built for the ReachInbox Software Development Intern assignment.
+A high-performance, distributed background email scheduling, dispatching, and monitoring system built for the ReachInbox Software Development Intern assignment.
 
-## Phase 1 Architecture & Tech Stack
+The application enables authenticated users to configure multi-sender email campaigns from CSV/TXT recipient lists, enforce sliding-window hourly rate limits and inter-email delays via Redis, index and search sent messages using Elasticsearch with safe client-side snippet highlighting, monitor background dispatch queues via an authenticated Bull Board dashboard, and receive delivery reports via Slack OAuth 2.0.
 
-- **Frontend**: React 18, TypeScript, Tailwind CSS, Vite, Lucide Icons
-- **Backend**: Express.js, TypeScript, Prisma ORM
-- **Database**: MySQL 8.0 on port 3307 (Docker)
-- **Queuing & Cache**: Redis 7 on port 6379 (Docker) & BullMQ (configured for subsequent phases)
-- **Search Engine**: Elasticsearch 8.15 on port 9200 (Docker)
-- **Infrastructure**: Docker Compose with health checks and persistent volumes
+---
+
+## Architecture & System Design
+
+### Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph ClientLayer["Client Layer"]
+        Browser["Web Browser (User)"]
+        ReactApp["React 18 + Vite Dashboard\n(Tailwind CSS, Lucide Icons)"]
+        Browser --> ReactApp
+    end
+
+    subgraph APILayer["API & Ingestion Layer (Port 5000)"]
+        Express["Express.js API Server"]
+        Passport["Passport.js (Google OAuth 2.0)"]
+        SessionStore["Redis Session Store (connect-redis)"]
+        CryptoService["AES-256-GCM Token Encryption"]
+        BullBoard["Bull Board Dashboard (/admin/queues)"]
+
+        ReactApp -- "REST API (JSON, Credentials Included)" --> Express
+        Express --> Passport
+        Passport --> SessionStore
+        Express --> CryptoService
+        Express --> BullBoard
+    end
+
+    subgraph StorageLayer["Data & State Infrastructure (Docker)"]
+        MySQL[("MySQL 8.0 (Port 3307)\nPrisma ORM Persistence")]
+        RedisDB[("Redis 7.0 (Port 6379)\nBullMQ Queue & Sliding Windows")]
+        ESIndex[("Elasticsearch 8.15 (Port 9200)\nSent Email Search Index")]
+    end
+
+    subgraph WorkerLayer["Distributed Dispatch Engine"]
+        Worker["BullMQ Worker Process\n(Concurrency: 5)"]
+        RateLimiter["Redis Sliding Window & Delay Limiter"]
+        Nodemailer["Nodemailer Multi-Sender Dispatcher"]
+        SlackNotifier["Slack Block Kit Idempotent Notifier"]
+
+        Worker --> RateLimiter
+        Worker --> Nodemailer
+        Worker --> SlackNotifier
+    end
+
+    subgraph ExternalServices["External Integrations"]
+        GoogleAuth["Google Identity (OAuth 2.0)"]
+        EtherealSMTP["Ethereal Multi-Sender SMTP Accounts"]
+        SlackOAuth["Slack API (OAuth v2 & Webhooks)"]
+        SlackChannels["Slack Workspace Channels"]
+    end
+
+    %% API Connections
+    Express -- "Transactions & Schemas" --> MySQL
+    Express -- "Enqueues Job { emailId }" --> RedisDB
+    Express -- "Search Queries" --> ESIndex
+    Passport -- "OAuth Flow" --> GoogleAuth
+    Express -- "OAuth Code Exchange" --> SlackOAuth
+
+    %% Worker Connections
+    RedisDB -- "Job Stream" --> Worker
+    Worker -- "Status: PROCESSING -> SENT/FAILED" --> MySQL
+    Worker -- "Rate Check & Delays" --> RedisDB
+    Worker -- "Multi-Account Dispatch" --> EtherealSMTP
+    Worker -- "Index Sent Document" --> ESIndex
+    SlackNotifier -- "Post Completion Summary" --> SlackChannels
+```
+
+---
+
+## Main Features
+
+- **Google OAuth 2.0 & Redis Sessions**: Secure Google authentication with persistent server-side Redis sessions (`connect-redis`) and user-scoped data isolation.
+- **CSV & TXT Recipient Parsing**: Client-side recipient parsing supporting comma, space, and newline delimiters, RFC 5322 regex validation, header skipping, and duplicate filtering.
+- **Multi-Sender SMTP Orchestration**: Dynamic multi-account sending via Ethereal SMTP with public sender choices exposed without leaking private SMTP credentials.
+- **BullMQ Queue Management**: Background job queuing storing only minimal `{ emailId }` payloads in Redis, with exponential backoff retries and concurrency control.
+- **Distributed Rate Limiting**: Redis-backed sliding 1-hour window per sender (`ZREMRANGEBYSCORE`, `ZCARD`, `ZADD`) and exact inter-email delay scheduling with automatic job requeuing.
+- **MySQL Persistence via Prisma ORM**: Relational database modeling for users, campaigns, scheduled emails, and encrypted Slack installations with foreign keys and indexes.
+- **Elasticsearch Full-Text Search**: Real-time indexing of sent email subjects and bodies with multi-match search queries and user ID scoping.
+- **Safe Snippet Highlighting**: Search match highlighting without `dangerouslySetInnerHTML` by parsing Elasticsearch `<em>` tokens into safe React elements.
+- **Protected Bull Board Queue Monitor**: Interactive queue monitor mounted at `/admin/queues` guarded by Express session authentication.
+- **Real Slack OAuth 2.0 Integration**: Single-use cryptographic CSRF state tokens and AES-256-GCM encryption for Slack bot access tokens at rest.
+- **Idempotent Delivery Reports**: Atomic MySQL status claims (`PENDING -> PROCESSING -> SENT`) ensuring single-delivery Slack Block Kit summaries when campaigns finish.
+- **Responsive Dark-Theme Dashboard**: Glassmorphic UI with real-time scheduled and sent metrics, in-place campaign scheduler modal, and search filters.
+
+---
+
+## Technology Stack
+
+| Category | Technologies |
+| :--- | :--- |
+| **Frontend** | React 18, TypeScript, Vite, Tailwind CSS, Lucide React Icons |
+| **Backend** | Node.js (v20+ / v24+), Express.js, TypeScript, TSX, Zod, Passport.js, Express-Session, Connect-Redis, Nodemailer |
+| **Databases & ORM** | MySQL 8.0, Prisma ORM (`@prisma/client`), Redis 7.0 (`ioredis`, `redis`), Elasticsearch 8.15 (`@elastic/elasticsearch`) |
+| **Queue & Monitoring**| BullMQ 6.x, Bull Board (`@bull-board/express`, `@bull-board/api`) |
+| **Integrations** | Google OAuth 2.0, Slack Web API (OAuth v2, Block Kit), Ethereal Email SMTP |
+| **Security & Crypto** | Node.js `crypto` (AES-256-GCM with 12-byte IV and 16-byte Auth Tag), CSRF State Tokens |
+| **Testing** | Vitest 5.x, React Testing Library, Isolated Mocking & Fixtures |
+
+---
+
+## Prerequisites & Port Allocations
+
+Ensure the following tools are installed on your host machine:
+
+- **Node.js**: `v20.x` or `v24.x` (LTS recommended)
+- **npm**: `v10.x` or higher
+- **Docker & Docker Compose**: Docker Desktop 4.x+
+
+### Port Allocations
+
+| Service | Port | Description |
+| :--- | :--- | :--- |
+| **Frontend Client** | `5173` | Vite development server (`http://localhost:5173`) |
+| **Backend API** | `5000` | Express REST API server (`http://localhost:5000`) |
+| **MySQL Database** | `3307` | Host forwarded port for Docker MySQL 8.0 container |
+| **Redis Server** | `6379` | Docker Redis 7.0 container for BullMQ and sessions |
+| **Elasticsearch** | `9200` | Docker Elasticsearch 8.15 container for sent email indexing |
+
+---
+
+## Installation & Setup
+
+### 1. Clone & Install Dependencies
+
+Clone the repository and install all monorepo dependencies:
+
+```powershell
+# Navigate to project directory
+cd C:\Users\Suprita\Documents\Projects\reachinbox-email-scheduler
+
+# Install root, backend, and frontend packages via npm workspaces
+npm install
+```
+
+---
+
+### 2. Configure Environment Variables
+
+Create the `.env` file for the backend and frontend using the provided templates:
+
+#### Backend Configuration (`backend/.env`)
+
+```powershell
+# Copy the example file
+Copy-Item backend\.env.example backend\.env
+```
+
+Populate `backend/.env` with your credentials:
+
+```ini
+PORT=5000
+NODE_ENV=development
+FRONTEND_URL=http://localhost:5173
+CLIENT_URL=http://localhost:5173
+
+# MySQL 8 Database (mapped to port 3307 on host)
+DATABASE_URL="mysql://reachinbox_user:reachinbox_password@localhost:3307/reachinbox_scheduler"
+
+# Redis (BullMQ & Session Storage)
+REDIS_URL="redis://localhost:6379"
+
+# Elasticsearch
+ELASTICSEARCH_URL="http://localhost:9200"
+
+# Express Session Secret
+SESSION_SECRET="your_secure_random_session_secret_32_chars"
+
+# Google OAuth 2.0 Credentials
+GOOGLE_CLIENT_ID="your_google_client_id_here.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your_google_client_secret_here"
+GOOGLE_CALLBACK_URL="http://localhost:5000/api/auth/google/callback"
+
+# Slack OAuth 2.0 Integration & Token Encryption
+# Required bot scopes: chat:write, channels:read, groups:read
+SLACK_CLIENT_ID="your_slack_client_id_here"
+SLACK_CLIENT_SECRET="your_slack_client_secret_here"
+SLACK_REDIRECT_URI="http://localhost:5000/api/slack/oauth/callback"
+# 32-byte / 64-hex AES-256-GCM encryption key (e.g., openssl rand -hex 32)
+SLACK_TOKEN_ENCRYPTION_KEY="your_64_hex_character_encryption_key_here"
+
+# BullMQ Worker Concurrency (default 5)
+WORKER_CONCURRENCY=5
+
+# Ethereal SMTP Senders Configuration (JSON array of test accounts)
+ETHEREAL_SENDERS_JSON='[{"key":"sender-1","displayName":"ReachInbox Sales","fromEmail":"your_ethereal_user_1@ethereal.email","host":"smtp.ethereal.email","port":587,"user":"your_ethereal_user_1@ethereal.email","pass":"your_ethereal_pass_1","secure":false},{"key":"sender-2","displayName":"ReachInbox Marketing","fromEmail":"your_ethereal_user_2@ethereal.email","host":"smtp.ethereal.email","port":587,"user":"your_ethereal_user_2@ethereal.email","pass":"your_ethereal_pass_2","secure":false}]'
+```
+
+#### Frontend Configuration (`frontend/.env`)
+
+```powershell
+# Copy the example file
+Copy-Item frontend\.env.example frontend\.env
+```
+
+```ini
+VITE_API_URL=http://localhost:5000/api
+```
+
+---
+
+### 3. Start Docker Infrastructure
+
+Start MySQL, Redis, and Elasticsearch containers in background daemon mode:
+
+```powershell
+npm run docker:up
+```
+
+Verify container health status:
+
+```powershell
+docker compose ps
+```
+
+*Expected output*: `reachinbox-mysql`, `reachinbox-redis`, and `reachinbox-elasticsearch` all in `healthy` status.
+
+---
+
+### 4. Database Setup & Prisma Client Generation
+
+Generate the Prisma Client and apply database migrations safely:
+
+```powershell
+# Generate Prisma Client
+npm --prefix backend run prisma:generate
+
+# Synchronize database schema non-destructively
+npx --prefix backend prisma db push
+```
+
+---
+
+## Running the Application
+
+You can launch all services concurrently or in dedicated PowerShell terminals:
+
+### Option A: Run Concurrently (Single Command)
+
+```powershell
+npm run dev
+```
+
+### Option B: Run in Separate Terminals (Recommended for Inspection)
+
+#### Terminal 1: Backend API Server
+```powershell
+npm run dev:backend
+```
+*API running at `http://localhost:5000`*
+
+#### Terminal 2: BullMQ Background Worker
+```powershell
+npm run dev:worker
+```
+*Worker active with 5 concurrent dispatchers, connected to Redis*
+
+#### Terminal 3: Frontend Client
+```powershell
+npm run dev:frontend
+```
+*Frontend running at `http://localhost:5173`*
+
+---
+
+## Application URLs
+
+| Interface | URL | Description |
+| :--- | :--- | :--- |
+| **Frontend Dashboard** | [http://localhost:5173](http://localhost:5173) | Main user interface, campaign composer, sent email search |
+| **Backend Health Check** | [http://localhost:5000/api/health](http://localhost:5000/api/health) | API health check and uptime metrics |
+| **Bull Board Queue Monitor** | [http://localhost:5000/admin/queues](http://localhost:5000/admin/queues) | Real-time queue visualizer for BullMQ (Authenticated) |
+
+---
+
+## Slack App Configuration
+
+To enable automated campaign completion notifications in Slack:
+
+1. **Create Slack App**:
+   - Go to the [Slack API Portal](https://api.slack.com/apps) and click **Create New App** > **From scratch**.
+   - Set the App Name (e.g. `ReachInbox Email Scheduler`) and select your development workspace.
+
+2. **Configure OAuth Redirect URL**:
+   - Navigate to **OAuth & Permissions** in the sidebar.
+   - Under **Redirect URLs**, add:
+     `http://localhost:5000/api/slack/oauth/callback`
+   - Click **Save URLs**.
+
+3. **Add Bot Token Scopes**:
+   - Under **Scopes** > **Bot Token Scopes**, add the following three permissions:
+     - `chat:write` — To post completion delivery summaries.
+     - `channels:read` — To list and verify public workspace channels.
+     - `groups:read` — To list and verify private channels the bot is invited to.
+
+4. **Retrieve Credentials**:
+   - Navigate to **Basic Information** > **App Credentials**.
+   - Copy **Client ID** and **Client Secret** into your `backend/.env`.
+   - Generate a 32-byte (64 hex character) encryption key (e.g., via `openssl rand -hex 32`) and assign to `SLACK_TOKEN_ENCRYPTION_KEY`.
+
+5. **Channel Access in Slack**:
+   - For private channels, invite the bot by typing `/invite @ReachInbox Email Scheduler` in the channel.
+
+---
+
+## End-to-End Walkthrough
+
+1. **Sign In**: Navigate to `http://localhost:5173` and click **Sign in with Google**.
+2. **Connect Slack (Optional)**: Click the **Connect Slack** badge in the header. Authorize the application on Slack's OAuth consent screen; upon redirection, your connected workspace name will appear.
+3. **Compose Campaign**:
+   - Click **Compose Campaign**.
+   - Select an authenticated sender account.
+   - Enter the email subject and body.
+   - Upload a `.csv` or `.txt` file containing recipient email addresses.
+   - Set the dispatch start time, delay between messages (e.g., `5` seconds), and hourly limit (e.g., `100` emails/hr).
+   - If Slack is connected, check **Notify Slack when campaign completes** and select the destination channel.
+   - Click **Schedule Campaign**.
+4. **Queue Processing & Rate Limiting**:
+   - BullMQ picks up jobs at the scheduled start time.
+   - Redis enforces the sliding 1-hour quota and inter-email delays.
+   - View active, completed, and delayed jobs in real-time on Bull Board at `http://localhost:5000/admin/queues`.
+5. **Sent Email Search & Highlights**:
+   - Once emails are sent, inspect the **Sent Emails** tab on the dashboard.
+   - Use the search bar to query by keyword; matching text will be safely highlighted.
+6. **Slack Delivery Notification**:
+   - As soon as all emails in the campaign reach a terminal status (`SENT` or `FAILED`), an idempotent Block Kit delivery report is posted to your chosen Slack channel.
+
+---
+
+## API Reference
+
+All endpoints (except `/api/health` and `/api/auth/google*`) require an active session cookie (`credentials: 'include'`).
+
+### Authentication
+- `GET /api/auth/google` — Initiates Google OAuth 2.0 flow.
+- `GET /api/auth/google/callback` — Google OAuth callback.
+- `GET /api/auth/status` — Returns current authenticated user profile.
+- `POST /api/auth/logout` — Destroys current session and logs out.
+
+### Email & Campaigns
+- `GET /api/senders` — Returns public sender choices (`key`, `displayName`, `fromEmail`).
+- `POST /api/campaigns` — Schedules a new email campaign.
+- `GET /api/emails/scheduled?page=1&limit=10` — Paginated scheduled emails.
+- `GET /api/emails/sent?page=1&limit=10` — Paginated sent email history.
+- `GET /api/emails/search?q=keyword&page=1&limit=10` — Elasticsearch sent email search.
+
+### Slack Integration
+- `GET /api/slack/status` — Returns Slack connection status and workspace name.
+- `GET /api/slack/oauth/start` — Initiates Slack OAuth 2.0 authorization.
+- `GET /api/slack/oauth/callback` — Slack OAuth callback with CSRF state verification.
+- `GET /api/slack/channels` — Fetches accessible workspace channels (`id`, `name`, `isPrivate`).
+- `POST /api/slack/disconnect` — Disconnects Slack workspace and clears stored tokens.
+
+### Health & Monitoring
+- `GET /api/health` — Returns system uptime and service status.
+- `GET /admin/queues` — Authenticated Bull Board dashboard.
+
+---
+
+## Security Architecture
+
+1. **AES-256-GCM Token Encryption**:
+   - Slack bot tokens are encrypted at rest in MySQL using authenticated AES-256-GCM.
+   - Format: `ivHex:authTagHex:ciphertextHex`.
+   - Tokens are decrypted in memory only immediately before posting and are never logged or returned via API responses.
+
+2. **Single-Use CSRF State Protection**:
+   - OAuth state parameters are generated as 32-byte cryptographic random hex strings and stored in the user session.
+   - State tokens are deleted immediately upon validation during callback handling.
+
+3. **User-Scoped Data Isolation**:
+   - All campaigns, scheduled emails, Elasticsearch search queries, and Slack installations are partitioned strictly by `userId = req.user.id`.
+
+4. **Minimal Queue Payload**:
+   - BullMQ jobs contain only `{ emailId: string }`.
+   - Private email bodies, recipient addresses, and SMTP credentials are never serialized into Redis queue data.
+
+5. **XSS-Safe Highlighting**:
+   - Search snippet rendering parses Elasticsearch `<em>` tags directly into React virtual DOM elements (`<mark>`) without using `dangerouslySetInnerHTML`.
+
+6. **Error Sanitization**:
+   - Upstream SMTP and network errors are sanitized to prevent credential leakage in logs and API error responses.
+
+---
+
+## Testing & Quality Assurance
+
+The codebase includes an isolated, deterministic test suite covering unit calculations, scheduling rules, rate limiters, token cryptography, OAuth flows, and highlighting helpers.
+
+### Run All Tests
+```powershell
+npm test
+```
+
+### Run Type Checking
+```powershell
+npm run typecheck
+```
+
+### Run Production Build
+```powershell
+npm run build
+```
+
+### Verified Test Results
+```text
+✓ backend (76 tests passed)
+  - slack.test.ts (28 tests)
+  - scheduler.test.ts (32 tests)
+  - rateLimiter.test.ts (16 tests)
+
+✓ frontend (24 tests passed)
+  - recipientParser.test.ts (18 tests)
+  - highlightHelper.test.ts (6 tests)
+
+Total: 100/100 tests passed (100% pass rate)
+Typecheck: 0 errors
+Production Build: Successful
+```
 
 ---
 
@@ -17,133 +430,75 @@ A scalable background email scheduling and dispatching application built for the
 
 ```
 reachinbox-email-scheduler/
-├── docker-compose.yml          # Infrastructure services (MySQL 8, Redis 7, Elasticsearch 8)
-├── package.json                # Monorepo root workspace configuration
-├── .gitignore                  # Git ignore rules
-├── .env.example                # Root environment template
-├── backend/                    # Express.js + TypeScript + Prisma backend
-│   ├── .env.example
+├── docker-compose.yml              # MySQL 8, Redis 7, Elasticsearch 8 services
+├── package.json                    # Workspace scripts & dev dependencies
+├── README.md                       # Comprehensive documentation
+├── .gitignore                      # Git exclusion rules
+├── backend/                        # Express API & Worker codebase
+│   ├── .env.example                # Backend environment template
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── prisma/
-│   │   └── schema.prisma       # Prisma ORM schema for MySQL
+│   │   └── schema.prisma           # Prisma MySQL schema
 │   └── src/
-│       ├── config/env.ts       # Type-safe environment configuration
-│       ├── controllers/        # Route controllers
-│       ├── routes/             # Express API routes
-│       ├── app.ts              # Express application factory
-│       ├── index.ts            # Server entrypoint (Port 5000)
-│       └── worker.ts           # Background worker process entrypoint
-└── frontend/                   # React + TypeScript + Vite + Tailwind CSS frontend
-    ├── .env.example
+│       ├── config/                 # Env, Redis, Prisma, Passport, Bull Board
+│       ├── controllers/            # Route controllers (Auth, Email, Campaign, Slack)
+│       ├── middleware/             # requireAuth, error sanitization
+│       ├── routes/                 # Express route definitions
+│       ├── services/               # Core services (Scheduler, Slack, RateLimiter, ES)
+│       ├── validators/             # Zod schema validators
+│       ├── app.ts                  # Express application factory
+│       ├── index.ts                # HTTP Server entry point (Port 5000)
+│       └── worker.ts               # BullMQ Worker entry point
+└── frontend/                       # React 18 + Vite frontend
+    ├── .env.example                # Frontend environment template
     ├── index.html
     ├── package.json
-    ├── postcss.config.js
     ├── tailwind.config.js
-    ├── tsconfig.json
     ├── vite.config.ts
     └── src/
-        ├── App.tsx             # Phase 1 Health Dashboard
-        ├── index.css           # Tailwind design tokens
-        └── main.tsx            # React root mount
+        ├── components/             # ComposeModal, Dashboard widgets
+        ├── utils/                  # Recipient parser, highlight helper
+        ├── App.tsx                 # Main application dashboard
+        └── main.tsx                # React root entry point
 ```
 
 ---
 
-## Getting Started (Phase 1 Setup)
+## Troubleshooting
 
-### Prerequisites
-
-- Node.js (v20+ or v24+)
-- Docker & Docker Compose
-- npm (v10+)
-
-### 1. Start Infrastructure Services
-
-Start MySQL 8, Redis 7, and Elasticsearch 8 in the background:
-
-```bash
-npm run docker:up
-```
-
-Verify the health status of all containers:
-
-```bash
-docker compose ps
-```
-
-### 2. Install Dependencies
-
-Install root, backend, and frontend dependencies via npm workspaces:
-
-```bash
-npm install
-```
-
-### 3. Generate Prisma Client
-
-Generate the Prisma client for MySQL:
-
-```bash
-npm --prefix backend run prisma:generate
-```
-
-### 4. Run Type Checks
-
-Verify TypeScript compilation across the entire monorepo:
-
-```bash
-npm run typecheck
-```
-
-### 5. Start Development Servers
-
-Run both the backend API and frontend client concurrently:
-
-```bash
-npm run dev
-```
-
-Or run them individually in separate terminals:
-
-```bash
-# Terminal 1: Backend API (http://localhost:5000)
-npm run dev:backend
-
-# Terminal 2: Frontend Client (http://localhost:5173)
-npm run dev:frontend
-```
+| Problem | Cause | Solution |
+| :--- | :--- | :--- |
+| **Port 5000 already in use** | An existing node process is bound to port 5000. | Run `Get-Process node \| Stop-Process` in PowerShell or change `PORT=5001` in `backend/.env`. |
+| **MySQL / Redis / ES Unavailable** | Docker containers are not running. | Run `npm run docker:up` and check `docker compose ps` to verify all three services are healthy. |
+| **Invalid ETHEREAL_SENDERS_JSON** | JSON parsing failed in `backend/.env`. | Ensure `ETHEREAL_SENDERS_JSON` is wrapped in single quotes and contains valid JSON array syntax. |
+| **Slack Encryption Key Error** | `SLACK_TOKEN_ENCRYPTION_KEY` is not 32 bytes (64 hex characters). | Generate a valid 64-hex key: `node -e "console.log(crypto.randomBytes(32).toString('hex'))"` and update `backend/.env`. |
+| **Slack Channel Fetch Failed** | Network timeout or bot missing permissions. | Re-open the modal or click **Retry fetching channels**. Ensure bot token scopes include `channels:read` and `groups:read`. |
+| **Bot Cannot Post to Private Channel** | Bot was not invited to the private channel. | In the private Slack channel, type `/invite @<YourBotName>` to grant access. |
 
 ---
 
-## Verification & Health Check
+## Demo Checklist & Screenshots
 
-The backend exposes a health endpoint:
-- **Health Check URL**: `http://localhost:5000/api/health`
-- **Expected Response**:
-  ```json
-  {
-    "status": "ok",
-    "service": "reachinbox-email-scheduler-backend",
-    "phase": 1,
-    "environment": "development",
-    "uptimeSeconds": 10,
-    "timestamp": "2026-09-03T17:24:00.000Z"
-  }
-  ```
+Ensure the following features are showcased during demonstration:
+
+1. [ ] **Sign in with Google**: Authenticate on the dashboard.
+2. [ ] **Connect Slack Workspace**: Authorize the Slack app via OAuth and view the connected badge.
+3. [ ] **Recipient Parsing**: Upload a sample CSV with valid, invalid, and duplicate emails to verify validation.
+4. [ ] **Campaign Dispatch**: Schedule a campaign with a 5-second delay and Slack notification enabled.
+5. [ ] **Bull Board Monitoring**: Observe active jobs in `http://localhost:5000/admin/queues`.
+6. [ ] **Sent Email Search**: Search sent emails with highlighted keywords.
+7. [ ] **Slack Delivery Report**: Verify Block Kit completion summary posted in Slack.
+
+### Screenshot Placeholders
+- Dashboard Overview: `docs/screenshots/dashboard_overview.png`
+- Campaign Composer: `docs/screenshots/compose_modal.png`
+- Bull Board Queue Visualizer: `docs/screenshots/bull_board.png`
+- Slack Completion Notification: `docs/screenshots/slack_notification.png`
 
 ---
 
-## Available NPM Scripts
+## Author
 
-| Command | Description |
-| :--- | :--- |
-| `npm run dev` | Runs backend and frontend concurrently |
-| `npm run dev:backend` | Starts the Express backend in watch mode |
-| `npm run dev:frontend` | Starts the Vite frontend dev server |
-| `npm run dev:worker` | Starts the background worker entry point |
-| `npm run typecheck` | Runs TypeScript typecheck on both backend and frontend |
-| `npm run build` | Builds both backend and frontend for production |
-| `npm run docker:up` | Starts MySQL, Redis, and Elasticsearch containers |
-| `npm run docker:down` | Stops and removes containers |
-| `npm run docker:logs` | Streams logs from all Docker containers |
+**Suprita Biradar**
+*ReachInbox Software Development Intern Assignment*
