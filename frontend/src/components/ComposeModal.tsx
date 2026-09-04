@@ -49,6 +49,17 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
   const [delaySeconds, setDelaySeconds] = useState<number>(5);
   const [hourlyLimit, setHourlyLimit] = useState<number>(100);
 
+  // Slack Integration States
+  const [slackConnected, setSlackConnected] = useState<boolean>(false);
+  const [slackInstallationId, setSlackInstallationId] = useState<string | null>(null);
+  const [slackTeamName, setSlackTeamName] = useState<string | null>(null);
+  const [slackChannels, setSlackChannels] = useState<Array<{ id: string; name: string; isPrivate: boolean }>>([]);
+  const [loadingSlackChannels, setLoadingSlackChannels] = useState<boolean>(false);
+  const [notifySlack, setNotifySlack] = useState<boolean>(false);
+  const [selectedSlackChannelId, setSelectedSlackChannelId] = useState<string>('');
+  const [selectedSlackChannelName, setSelectedSlackChannelName] = useState<string>('');
+  const [slackChannelError, setSlackChannelError] = useState<string | null>(null);
+
   // Submission Status
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -57,7 +68,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
   // File Input Ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch senders list when modal opens
+  // Fetch senders and Slack status when modal opens
   useEffect(() => {
     if (isOpen) {
       setLoadingSenders(true);
@@ -72,6 +83,24 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
         .catch((err) => console.warn('Failed to fetch senders:', err))
         .finally(() => setLoadingSenders(false));
 
+      // Fetch Slack connection status
+      fetch('/api/slack/status', { credentials: 'include' })
+        .then((res) => res.json())
+        .then((data) => {
+          const instId = data.installation?.id || data.installationId || null;
+          const tName = data.installation?.teamName || data.teamName || 'Slack Workspace';
+          if (data.status === 'success' && data.connected && instId) {
+            setSlackConnected(true);
+            setSlackInstallationId(instId);
+            setSlackTeamName(tName);
+          } else {
+            setSlackConnected(false);
+            setSlackInstallationId(null);
+            setSlackTeamName(null);
+          }
+        })
+        .catch((err) => console.warn('Failed to fetch Slack status:', err));
+
       const now = new Date();
       now.setMinutes(now.getMinutes() + 5);
       const localISO = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
@@ -82,6 +111,56 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
       setIdempotencyKey(`idemp-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
     }
   }, [isOpen]);
+
+  // Fetch channels when notifySlack is enabled
+  const fetchChannels = async () => {
+    setLoadingSlackChannels(true);
+    setSlackChannelError(null);
+    try {
+      const res = await fetch('/api/slack/channels', { credentials: 'include' });
+      let data: { status?: string; channels?: Array<{ id: string; name: string; isPrivate: boolean }>; message?: string };
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error('Received an invalid response from the server.');
+      }
+
+      if (res.ok && data.status === 'success' && data.channels && Array.isArray(data.channels)) {
+        setSlackChannels(data.channels);
+        if (data.channels.length > 0 && !selectedSlackChannelId) {
+          setSelectedSlackChannelId(data.channels[0].id);
+          setSelectedSlackChannelName(data.channels[0].name);
+        }
+      } else {
+        const rawMsg = data?.message || 'Failed to load Slack channels';
+        const userMsg = rawMsg.toLowerCase().includes('fetch failed')
+          ? 'Unable to connect to Slack API. Please check your network connection and try again.'
+          : rawMsg;
+        setSlackChannelError(userMsg);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error fetching Slack channels';
+      const userMsg = msg.toLowerCase().includes('fetch failed')
+        ? 'Unable to connect to Slack API. Please check your network connection and try again.'
+        : msg;
+      setSlackChannelError(userMsg);
+    } finally {
+      setLoadingSlackChannels(false);
+    }
+  };
+
+  const handleNotifySlackToggle = (checked: boolean) => {
+    setNotifySlack(checked);
+    if (checked && slackChannels.length === 0) {
+      fetchChannels();
+    }
+  };
+
+  const handleChannelSelect = (channelId: string) => {
+    setSelectedSlackChannelId(channelId);
+    const found = slackChannels.find((c) => c.id === channelId);
+    setSelectedSlackChannelName(found ? found.name : '');
+  };
 
   if (!isOpen) return null;
 
@@ -133,6 +212,9 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
     setSubmitError(null);
     setShowRecipientDetails(false);
     setIsSubmitting(false);
+    setNotifySlack(false);
+    setSelectedSlackChannelId('');
+    setSelectedSlackChannelName('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -146,6 +228,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
   const hasSubject = subject.trim().length > 0;
   const hasBody = body.trim().length > 0;
   const hasValidRecipients = (parseResult?.valid.length ?? 0) > 0;
+  const isSlackValid = !notifySlack || (Boolean(slackInstallationId) && Boolean(selectedSlackChannelId));
 
   const isFormValid = hasSender &&
     hasSubject && 
@@ -154,6 +237,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
     isStartTimeValid && 
     isDelayValid && 
     isHourlyLimitValid &&
+    isSlackValid &&
     !isParsing;
 
   // Handle Schedule Submit
@@ -165,6 +249,23 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
     setSubmitError(null);
 
     try {
+      const payload: Record<string, unknown> = {
+        senderKey: selectedSenderKey,
+        subject: subject.trim(),
+        body: body.trim(),
+        recipients: parseResult.valid,
+        startTime: new Date(startTime).toISOString(),
+        delaySeconds: Number(delaySeconds),
+        hourlyLimit: Number(hourlyLimit)
+      };
+
+      if (notifySlack && slackInstallationId && selectedSlackChannelId) {
+        payload.notifySlack = true;
+        payload.slackInstallationId = slackInstallationId;
+        payload.slackChannelId = selectedSlackChannelId;
+        payload.slackChannelName = selectedSlackChannelName || undefined;
+      }
+
       const response = await fetch('/api/campaigns', {
         method: 'POST',
         headers: {
@@ -172,15 +273,7 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
           'Idempotency-Key': idempotencyKey
         },
         credentials: 'include',
-        body: JSON.stringify({
-          senderKey: selectedSenderKey,
-          subject: subject.trim(),
-          body: body.trim(),
-          recipients: parseResult.valid,
-          startTime: new Date(startTime).toISOString(),
-          delaySeconds: Number(delaySeconds),
-          hourlyLimit: Number(hourlyLimit)
-        })
+        body: JSON.stringify(payload)
       });
 
       const data = await response.json();
@@ -518,6 +611,111 @@ export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps):
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Section 4: Slack Completion Notification (Optional) */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-800/60 pb-2">
+                <span className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
+                  4. Slack Notification (Optional)
+                </span>
+              </div>
+
+              {slackConnected ? (
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center space-x-2.5 cursor-pointer text-xs font-medium text-slate-200 select-none">
+                      <input
+                        type="checkbox"
+                        checked={notifySlack}
+                        onChange={(e) => handleNotifySlackToggle(e.target.checked)}
+                        disabled={isSubmitting}
+                        className="w-4 h-4 rounded border-slate-700 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-slate-950 bg-slate-900 cursor-pointer"
+                      />
+                      <span>Notify Slack when campaign completes</span>
+                    </label>
+                    {slackTeamName && (
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-indigo-950/80 border border-indigo-700/50 text-indigo-300">
+                        {slackTeamName}
+                      </span>
+                    )}
+                  </div>
+
+                  {notifySlack && (
+                    <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="slack-channel-select" className="block text-xs font-medium text-slate-300">
+                          Destination Channel <span className="text-rose-400">*</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={fetchChannels}
+                          disabled={loadingSlackChannels}
+                          className="text-[11px] text-indigo-400 hover:text-indigo-300 transition"
+                        >
+                          {loadingSlackChannels ? 'Loading...' : 'Refresh channels'}
+                        </button>
+                      </div>
+
+                      {slackChannelError ? (
+                        <div className="p-2.5 rounded-lg bg-rose-950/40 border border-rose-800/40 text-rose-300 space-y-2">
+                          <p className="text-[11px] flex items-center space-x-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                            <span>{slackChannelError}</span>
+                          </p>
+                          <button
+                            type="button"
+                            onClick={fetchChannels}
+                            disabled={loadingSlackChannels}
+                            className="text-[11px] font-medium text-indigo-400 hover:text-indigo-300 underline inline-block"
+                          >
+                            {loadingSlackChannels ? 'Retrying...' : 'Retry fetching channels'}
+                          </button>
+                        </div>
+                      ) : (
+                        <select
+                          id="slack-channel-select"
+                          value={selectedSlackChannelId}
+                          onChange={(e) => handleChannelSelect(e.target.value)}
+                          disabled={loadingSlackChannels || isSubmitting}
+                          className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-100 text-xs focus:outline-none focus:border-indigo-500 transition"
+                        >
+                          {loadingSlackChannels ? (
+                            <option value="">Loading Slack channels...</option>
+                          ) : slackChannels.length === 0 ? (
+                            <option value="">No channels available</option>
+                          ) : (
+                            slackChannels.map((ch) => (
+                              <option key={ch.id} value={ch.id}>
+                                {ch.isPrivate ? '🔒' : '#'} {ch.name}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      )}
+
+                      <p className="text-[10px] text-slate-500">
+                        ReachInbox will post a delivery summary to this channel once all emails finish.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium text-slate-300">Connect Slack for completion alerts</p>
+                    <p className="text-[11px] text-slate-500">Receive automated delivery reports when campaigns finish.</p>
+                  </div>
+                  <a
+                    href="/api/slack/oauth/start"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-medium transition shrink-0"
+                  >
+                    <span>Connect Slack</span>
+                  </a>
+                </div>
+              )}
             </div>
 
           </div>

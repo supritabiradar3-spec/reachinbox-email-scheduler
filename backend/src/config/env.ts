@@ -13,5 +13,22 @@ export const config = {
     clientId: process.env.GOOGLE_CLIENT_ID || '',
     clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
     callbackUrl: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback'
+  },
+  slack: {
+    clientId: process.env.SLACK_CLIENT_ID || '',
+    clientSecret: process.env.SLACK_CLIENT_SECRET || '',
+    redirectUri: process.env.SLACK_REDIRECT_URI || 'http://localhost:5000/api/slack/oauth/callback',
+    tokenEncryptionKey: process.env.SLACK_TOKEN_ENCRYPTION_KEY || ''
   }
 } as const;
+
+export const isSlackConfigured = (): boolean => {
+  const clientId = process.env.SLACK_CLIENT_ID || config.slack.clientId;
+  const clientSecret = process.env.SLACK_CLIENT_SECRET || config.slack.clientSecret;
+  const tokenEncryptionKey = process.env.SLACK_TOKEN_ENCRYPTION_KEY || config.slack.tokenEncryptionKey;
+  return Boolean(
+    clientId &&
+    clientSecret &&
+    tokenEncryptionKey
+  );
+};

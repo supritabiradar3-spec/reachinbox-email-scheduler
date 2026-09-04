@@ -202,12 +202,68 @@ export default function App(): React.JSX.Element {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeSearch, setActiveSearch] = useState<string>('');
 
+  // Slack Integration State
+  const [slackConnected, setSlackConnected] = useState<boolean>(false);
+  const [slackTeamName, setSlackTeamName] = useState<string | null>(null);
+  const [slackLoading, setSlackLoading] = useState<boolean>(false);
+  const [slackDisconnecting, setSlackDisconnecting] = useState<boolean>(false);
+  const [slackAlert, setSlackAlert] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
   // Build safe Bull Board Queue Monitor URL from API configuration
   const queueMonitorUrl = useMemo(() => {
     const apiUrl = (import.meta as unknown as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL || 'http://localhost:5000';
     const baseOrigin = apiUrl.replace(/\/api\/?$/, '').replace(/\/+$/, '');
     return `${baseOrigin}/admin/queues`;
   }, []);
+
+  // Fetch Slack Connection Status
+  const fetchSlackStatus = useCallback(async () => {
+    setSlackLoading(true);
+    try {
+      const response = await fetch('/api/slack/status', { credentials: 'include' });
+      if (response.ok) {
+        const data = await response.json();
+        const teamName = data.installation?.teamName || data.teamName || data.workspaceName || null;
+        if (data.status === 'success' && data.connected) {
+          setSlackConnected(true);
+          setSlackTeamName(teamName || 'Slack Workspace');
+        } else {
+          setSlackConnected(false);
+          setSlackTeamName(null);
+        }
+      }
+    } catch {
+      setSlackConnected(false);
+    } finally {
+      setSlackLoading(false);
+    }
+  }, []);
+
+  // Disconnect Slack Workspace
+  const handleSlackDisconnect = async () => {
+    if (!window.confirm('Disconnect your Slack workspace? Completion notifications will be disabled.')) {
+      return;
+    }
+    setSlackDisconnecting(true);
+    try {
+      const response = await fetch('/api/slack/disconnect', {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      if (response.ok) {
+        setSlackConnected(false);
+        setSlackTeamName(null);
+        setSlackAlert({ type: 'success', message: 'Slack workspace disconnected.' });
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        setSlackAlert({ type: 'error', message: errData.message || 'Failed to disconnect Slack workspace.' });
+      }
+    } catch {
+      setSlackAlert({ type: 'error', message: 'Network error disconnecting Slack workspace.' });
+    } finally {
+      setSlackDisconnecting(false);
+    }
+  };
 
   // Check Current Authentication State
   const checkAuth = async () => {
@@ -365,6 +421,7 @@ export default function App(): React.JSX.Element {
 
   const handleRefreshAll = () => {
     fetchSenders();
+    fetchSlackStatus();
     fetchScheduledEmails(scheduledPagination.page || 1);
     if (activeSearch) {
       executeSearch(activeSearch, sentPagination.page || 1);
@@ -382,20 +439,33 @@ export default function App(): React.JSX.Element {
       } else {
         setAuthError(`Authentication error: ${errorParam}`);
       }
+    }
+
+    const slackConnectedParam = params.get('slack_connected') === 'true' || params.get('slack_auth') === 'success';
+    const slackErrorParam = params.get('slack_error') || params.get('slack_auth_error');
+    if (slackConnectedParam) {
+      setSlackAlert({ type: 'success', message: 'Slack workspace connected successfully! You can now select Slack channels in campaign compose.' });
+      fetchSlackStatus();
+    } else if (slackErrorParam) {
+      setSlackAlert({ type: 'error', message: `Slack authentication failed: ${slackErrorParam}` });
+    }
+
+    if (errorParam || params.has('slack_connected') || params.has('slack_auth') || slackErrorParam) {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
 
     checkAuth();
   }, []);
 
-  // Fetch all summary data (senders, scheduled emails, sent emails) when authenticated user is present
+  // Fetch all summary data (senders, slack status, scheduled emails, sent emails) when authenticated user is present
   useEffect(() => {
     if (user) {
       fetchSenders();
+      fetchSlackStatus();
       fetchScheduledEmails(1);
       fetchSentEmails(1);
     }
-  }, [user, fetchSenders, fetchScheduledEmails, fetchSentEmails]);
+  }, [user, fetchSenders, fetchSlackStatus, fetchScheduledEmails, fetchSentEmails]);
 
   // Ensure active tab view is refreshed on tab switch
   useEffect(() => {
@@ -475,9 +545,36 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
 
-          {/* User Profile & Logout */}
+          {/* User Profile & Actions */}
           {user && (
             <div className="flex items-center space-x-3 sm:space-x-4">
+              
+              {/* Slack Connection Status Badge */}
+              {slackConnected ? (
+                <div className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-950/70 border border-indigo-700/60 text-xs shadow-sm">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="text-indigo-300 font-medium">#{slackTeamName || 'Slack'}</span>
+                  <button
+                    onClick={handleSlackDisconnect}
+                    disabled={slackDisconnecting}
+                    className="text-[10px] text-slate-400 hover:text-rose-400 transition pl-1 font-medium"
+                    title="Disconnect Slack Workspace"
+                  >
+                    {slackDisconnecting ? '...' : 'Disconnect'}
+                  </button>
+                </div>
+              ) : (
+                <a
+                  href="/api/slack/oauth/start"
+                  id="slack-connect-link"
+                  className="hidden sm:inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700/80 transition active:scale-[0.98]"
+                  title="Connect Slack for campaign completion notifications"
+                >
+                  <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+                  <span>Connect Slack</span>
+                </a>
+              )}
+
               <a
                 href={queueMonitorUrl}
                 target="_blank"
@@ -523,6 +620,30 @@ export default function App(): React.JSX.Element {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 flex flex-col">
+        
+        {/* Slack Alert Toast/Banner */}
+        {slackAlert && (
+          <div className={`mb-6 p-3.5 rounded-xl border text-xs flex items-center justify-between ${
+            slackAlert.type === 'success'
+              ? 'bg-emerald-950/70 border-emerald-800/70 text-emerald-300'
+              : 'bg-rose-950/70 border-rose-800/70 text-rose-300'
+          }`}>
+            <div className="flex items-center space-x-2">
+              {slackAlert.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              )}
+              <span>{slackAlert.message}</span>
+            </div>
+            <button
+              onClick={() => setSlackAlert(null)}
+              className="p-1 text-slate-400 hover:text-slate-200 rounded transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
         
         {/* Unauthenticated View: Clean Login Card */}
         {!user ? (
@@ -735,12 +856,12 @@ export default function App(): React.JSX.Element {
                 <button
                   id="dashboard-refresh-btn"
                   onClick={handleRefreshAll}
-                  disabled={scheduledLoading || sentLoading}
+                  disabled={scheduledLoading || sentLoading || slackLoading}
                   className="inline-flex items-center space-x-1.5 px-3 py-1.5 mb-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium transition disabled:opacity-50"
                   title="Refresh dashboard data"
                   aria-label="Refresh dashboard data"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${scheduledLoading || sentLoading ? 'animate-spin text-indigo-400' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 ${scheduledLoading || sentLoading || slackLoading ? 'animate-spin text-indigo-400' : ''}`} />
                   <span className="hidden sm:inline">Refresh</span>
                 </button>
               </div>

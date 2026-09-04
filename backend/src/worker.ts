@@ -6,6 +6,7 @@ import { EMAIL_QUEUE_NAME } from './queues/email.queue.js';
 import { sendEmail, verifyAllTransporters, sanitizeError } from './services/email.service.js';
 import { indexSentEmail, ensureSentEmailsIndex } from './services/elasticsearch.service.js';
 import { reserveDispatchSlot } from './services/rateLimiter.service.js';
+import { checkAndSendCampaignSlackNotification } from './services/slack.service.js';
 
 // Pre-flight check: Fail fast if no valid Ethereal SMTP senders are configured
 const configuredSenders = getConfiguredSenders();
@@ -31,7 +32,7 @@ const concurrency = getWorkerConcurrency();
 
 /**
  * ==============================================================================
- * ReachInbox Email Scheduler - BullMQ Background Worker (Phase 7)
+ * ReachInbox Email Scheduler - BullMQ Background Worker (Phase 7 & 8)
  * ==============================================================================
  *
  * Distributed Rate Limiting & Exactly-Once Delivery Architecture:
@@ -48,6 +49,8 @@ const concurrency = getWorkerConcurrency();
  *    - Atomic MySQL lock (`status: { not: 'SENT' }` -> `status: 'PROCESSING'`).
  * 4. Multi-sender SMTP & Resilient Elasticsearch Indexing:
  *    - Success on SMTP is authoritative even if ES indexing is deferred.
+ * 5. Slack Idempotent Campaign Completion:
+ *    - Atomically triggers Slack notification when all emails reach terminal state.
  * ==============================================================================
  */
 
@@ -175,6 +178,15 @@ export const processEmailJob = async (
     } catch (esErr: unknown) {
       console.warn(`[Worker] Elasticsearch indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
     }
+
+    // 6c. Check if campaign completed and dispatch Slack notification if configured
+    if (emailRecord.campaignId) {
+      try {
+        await checkAndSendCampaignSlackNotification(emailRecord.campaignId);
+      } catch (slackErr: unknown) {
+        console.warn(`[Worker] Slack notification check failed for campaign ${emailRecord.campaignId}: ${sanitizeError(slackErr)}`);
+      }
+    }
   } catch (error: unknown) {
     // If this is a BullMQ DelayedError from moving to delayed, let it bubble up cleanly
     if (error instanceof DelayedError || (error as Error)?.name === 'DelayedError') {
@@ -199,6 +211,15 @@ export const processEmailJob = async (
     console.error(
       `[Worker] Error sending email ${emailId} (attempt ${currentAttempt}/${maxAttempts}) via [${emailRecord.senderKey}]: ${sanitizedErrMsg}`
     );
+
+    // If all retry attempts are exhausted and email reaches terminal FAILED state, check campaign completion
+    if (isExhausted && emailRecord.campaignId) {
+      try {
+        await checkAndSendCampaignSlackNotification(emailRecord.campaignId);
+      } catch (slackErr: unknown) {
+        console.warn(`[Worker] Slack notification check failed for exhausted campaign ${emailRecord.campaignId}: ${sanitizeError(slackErr)}`);
+      }
+    }
 
     // Re-throw so BullMQ triggers exponential backoff retry until maxAttempts
     throw new Error(sanitizedErrMsg);

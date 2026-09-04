@@ -15,6 +15,14 @@ enum EmailStatus {
   RATE_LIMITED
 }
 
+enum SlackNotificationStatus {
+  NOT_REQUESTED
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
 model User {
   id        String   @id @default(uuid())
   googleId  String   @unique @map("google_id")
@@ -24,30 +32,58 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  campaigns EmailCampaign[]
+  campaigns          EmailCampaign[]
+  slackInstallations SlackInstallation[]
 
   @@map("users")
 }
 
-model EmailCampaign {
-  id             String   @id @default(uuid())
-  userId         String   @map("user_id")
-  senderKey      String   @default("sender-1") @map("sender_key")
-  subject        String   @db.VarChar(255)
-  body           String   @db.Text
-  startTime      DateTime @map("start_time")
-  delaySeconds   Int      @map("delay_seconds")
-  hourlyLimit    Int      @map("hourly_limit")
-  recipientCount Int      @map("recipient_count")
-  idempotencyKey String   @map("idempotency_key")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+model SlackInstallation {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  teamId            String   @map("team_id")
+  teamName          String   @map("team_name")
+  botUserId         String   @map("bot_user_id")
+  encryptedBotToken String   @map("encrypted_bot_token") @db.Text
+  scopes            String   @db.Text
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
-  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  emails ScheduledEmail[]
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns EmailCampaign[]
+
+  @@unique([userId, teamId])
+  @@index([userId])
+  @@map("slack_installations")
+}
+
+model EmailCampaign {
+  id                      String                  @id @default(uuid())
+  userId                  String                  @map("user_id")
+  senderKey               String                  @default("sender-1") @map("sender_key")
+  subject                 String                  @db.VarChar(255)
+  body                    String                  @db.Text
+  startTime               DateTime                @map("start_time")
+  delaySeconds            Int                     @map("delay_seconds")
+  hourlyLimit             Int                     @map("hourly_limit")
+  recipientCount          Int                     @map("recipient_count")
+  idempotencyKey          String                  @map("idempotency_key")
+  slackInstallationId     String?                 @map("slack_installation_id")
+  slackChannelId          String?                 @map("slack_channel_id")
+  slackChannelName        String?                 @map("slack_channel_name")
+  slackNotificationStatus SlackNotificationStatus @default(NOT_REQUESTED) @map("slack_notification_status")
+  slackNotificationSentAt DateTime?               @map("slack_notification_sent_at")
+  slackNotificationError  String?                 @map("slack_notification_error") @db.Text
+  createdAt               DateTime                @default(now()) @map("created_at")
+  updatedAt               DateTime                @updatedAt @map("updated_at")
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slackInstallation SlackInstallation? @relation(fields: [slackInstallationId], references: [id], onDelete: SetNull)
+  emails            ScheduledEmail[]
 
   @@unique([userId, idempotencyKey])
   @@index([userId])
+  @@index([slackInstallationId])
   @@map("email_campaigns")
 }
 

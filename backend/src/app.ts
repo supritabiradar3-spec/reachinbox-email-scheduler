@@ -13,6 +13,7 @@ import authRoutes from './routes/auth.routes.js';
 import campaignRoutes from './routes/campaign.routes.js';
 import emailRoutes from './routes/email.routes.js';
 import senderRoutes from './routes/sender.routes.js';
+import slackRoutes from './routes/slack.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -69,13 +70,14 @@ export const createApp = (): Express => {
   app.use('/api/campaigns', campaignRoutes);
   app.use('/api/emails', emailRoutes);
   app.use('/api/senders', senderRoutes);
+  app.use('/api/slack', slackRoutes);
 
   // Root endpoint info
   app.get('/', (_req: Request, res: Response) => {
     res.json({
       name: 'ReachInbox Email Scheduler API',
       version: '1.0.0',
-      phase: 7,
+      phase: 8,
       status: 'active',
       endpoints: {
         health: '/api/health',
@@ -84,6 +86,13 @@ export const createApp = (): Express => {
           googleCallback: '/api/auth/google/callback',
           me: '/api/auth/me',
           logout: '/api/auth/logout'
+        },
+        slack: {
+          start: '/api/slack/oauth/start',
+          callback: '/api/slack/oauth/callback',
+          status: '/api/slack/status',
+          channels: '/api/slack/channels',
+          disconnect: 'POST /api/slack/disconnect'
         },
         admin: {
           queues: '/admin/queues'

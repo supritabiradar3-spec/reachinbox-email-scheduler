@@ -6,6 +6,8 @@ import {
   deduplicateRecipients, 
   calculateScheduledTime 
 } from '../validators/campaign.validator.js';
+import { decryptSlackToken } from '../services/slackCrypto.service.js';
+import { verifySlackChannel } from '../services/slack.service.js';
 
 /**
  * Handles creation and scheduling of email campaigns.
@@ -73,7 +75,9 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
           delaySeconds: existingCampaign.delaySeconds,
           hourlyLimit: existingCampaign.hourlyLimit,
           recipientCount: existingCampaign.recipientCount,
-          createdAt: existingCampaign.createdAt.toISOString()
+          createdAt: existingCampaign.createdAt.toISOString(),
+          slackNotificationStatus: existingCampaign.slackNotificationStatus,
+          slackChannelName: existingCampaign.slackChannelName
         },
         emails: existingCampaign.emails.map((email) => ({
           ...email,
@@ -81,6 +85,45 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         }))
       });
       return;
+    }
+
+    // Verify Slack configuration if requested
+    let slackInstallationId: string | null = null;
+    let slackChannelId: string | null = null;
+    let slackChannelName: string | null = null;
+    let slackNotificationStatus: 'NOT_REQUESTED' | 'PENDING' = 'NOT_REQUESTED';
+
+    if (input.notifySlack && input.slackInstallationId && input.slackChannelId) {
+      const installation = await prisma.slackInstallation.findFirst({
+        where: {
+          id: input.slackInstallationId,
+          userId: req.user.id
+        }
+      });
+
+      if (!installation) {
+        res.status(400).json({
+          status: 'error',
+          message: 'Selected Slack workspace installation does not exist or does not belong to you'
+        });
+        return;
+      }
+
+      try {
+        const botToken = decryptSlackToken(installation.encryptedBotToken);
+        const verifiedChannel = await verifySlackChannel(botToken, input.slackChannelId);
+        slackInstallationId = installation.id;
+        slackChannelId = verifiedChannel.id;
+        slackChannelName = verifiedChannel.name || input.slackChannelName || null;
+        slackNotificationStatus = 'PENDING';
+      } catch (slackVerifyErr: unknown) {
+        const errMsg = slackVerifyErr instanceof Error ? slackVerifyErr.message : 'Invalid Slack channel';
+        res.status(400).json({
+          status: 'error',
+          message: `Slack channel verification failed: ${errMsg}`
+        });
+        return;
+      }
     }
 
     // Deduplicate recipients case-insensitively
@@ -107,7 +150,11 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
           delaySeconds: input.delaySeconds,
           hourlyLimit: input.hourlyLimit,
           recipientCount: uniqueRecipients.length,
-          idempotencyKey
+          idempotencyKey,
+          slackInstallationId,
+          slackChannelId,
+          slackChannelName,
+          slackNotificationStatus
         }
       });
 
@@ -161,7 +208,9 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         delaySeconds: campaign.delaySeconds,
         hourlyLimit: campaign.hourlyLimit,
         recipientCount: campaign.recipientCount,
-        createdAt: campaign.createdAt.toISOString()
+        createdAt: campaign.createdAt.toISOString(),
+        slackNotificationStatus: campaign.slackNotificationStatus,
+        slackChannelName: campaign.slackChannelName
       },
       emails: createdEmails.map((email) => ({
         id: email.id,
