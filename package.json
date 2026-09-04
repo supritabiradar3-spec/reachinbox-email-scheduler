@@ -1,0 +1,24 @@
+{
+  "name": "reachinbox-email-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ReachInbox Email Scheduler - Scalable background email scheduling system",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:worker": "npm run dev:worker --workspace=backend",
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "typecheck": "npm run typecheck --workspace=backend && npm run typecheck --workspace=frontend",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

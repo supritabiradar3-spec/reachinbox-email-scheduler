@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build and distribution
+dist/
+build/
+.output/
+
+# Environment Variables
+.env
+.env.*
+.env*.local
+!.env.example
+!.env*.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Docker volumes / scratch
+data/
+*.tsbuildinfo
