@@ -20,6 +20,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { ComposeModal } from './components/ComposeModal';
+import { HighlightSnippet } from './utils/highlightHelper';
 
 interface AuthUser {
   name: string | null;
@@ -356,14 +357,11 @@ export default function App(): React.JSX.Element {
 
   const handleRefreshAll = () => {
     fetchSenders();
-    if (activeTab === 'scheduled') {
-      fetchScheduledEmails(scheduledPagination.page || 1);
+    fetchScheduledEmails(scheduledPagination.page || 1);
+    if (activeSearch) {
+      executeSearch(activeSearch, sentPagination.page || 1);
     } else {
-      if (activeSearch) {
-        executeSearch(activeSearch, sentPagination.page || 1);
-      } else {
-        fetchSentEmails(sentPagination.page || 1);
-      }
+      fetchSentEmails(sentPagination.page || 1);
     }
   };
 
@@ -382,17 +380,29 @@ export default function App(): React.JSX.Element {
     checkAuth();
   }, []);
 
-  // Fetch data and senders when authenticated user is present
+  // Fetch all summary data (senders, scheduled emails, sent emails) when authenticated user is present
   useEffect(() => {
     if (user) {
       fetchSenders();
+      fetchScheduledEmails(1);
+      fetchSentEmails(1);
+    }
+  }, [user, fetchSenders, fetchScheduledEmails, fetchSentEmails]);
+
+  // Ensure active tab view is refreshed on tab switch
+  useEffect(() => {
+    if (user) {
       if (activeTab === 'scheduled') {
-        fetchScheduledEmails(1);
+        fetchScheduledEmails(scheduledPagination.page || 1);
       } else {
-        fetchSentEmails(1);
+        if (activeSearch) {
+          executeSearch(activeSearch, sentPagination.page || 1);
+        } else {
+          fetchSentEmails(sentPagination.page || 1);
+        }
       }
     }
-  }, [user, activeTab, fetchSenders, fetchScheduledEmails, fetchSentEmails]);
+  }, [activeTab]);
 
   const handleGoogleLogin = () => {
     setRedirectingToGoogle(true);
@@ -422,6 +432,7 @@ export default function App(): React.JSX.Element {
   const handleCampaignCreated = () => {
     setActiveTab('scheduled');
     fetchScheduledEmails(1);
+    fetchSentEmails(1);
     fetchSenders();
   };
 
@@ -1023,7 +1034,7 @@ export default function App(): React.JSX.Element {
                                     <p className="font-medium text-slate-200 truncate" title={item.subject}>{item.subject}</p>
                                     {item.snippet && (
                                       <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1 italic font-sans text-slate-400/90">
-                                        {item.snippet}
+                                        <HighlightSnippet snippet={item.snippet} />
                                       </p>
                                     )}
                                   </td>
@@ -1071,7 +1082,7 @@ export default function App(): React.JSX.Element {
                                 </p>
                                 {item.snippet && (
                                   <p className="text-[11px] text-slate-400 mt-1 line-clamp-2 italic">
-                                    {item.snippet}
+                                    <HighlightSnippet snippet={item.snippet} />
                                   </p>
                                 )}
                               </div>

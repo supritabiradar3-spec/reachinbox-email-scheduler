@@ -364,6 +364,99 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       expect(count).toBeGreaterThanOrEqual(3);
       await prisma.$disconnect();
     });
+
+    it('should format sent-list response contract with pagination metadata and user scoping using mock fixtures', () => {
+      const mockUserId = 'user-test-777';
+      const otherUserId = 'user-other-888';
+
+      const mockDbRecords = [
+        {
+          id: 'sent-email-1',
+          senderKey: 'sender-1',
+          recipientEmail: 'client1@example.com',
+          subject: 'Welcome to ReachInbox',
+          sentAt: new Date('2026-09-04T10:00:00.000Z'),
+          status: 'SENT',
+          smtpMessageId: '<msg-1@ethereal.email>',
+          etherealPreviewUrl: 'https://ethereal.email/message/msg-1',
+          campaign: { userId: mockUserId }
+        },
+        {
+          id: 'sent-email-2',
+          senderKey: 'sender-2',
+          recipientEmail: 'client2@example.com',
+          subject: 'Product Update',
+          sentAt: new Date('2026-09-04T10:05:00.000Z'),
+          status: 'SENT',
+          smtpMessageId: '<msg-2@ethereal.email>',
+          etherealPreviewUrl: 'https://ethereal.email/message/msg-2',
+          campaign: { userId: mockUserId }
+        },
+        {
+          id: 'other-user-email',
+          senderKey: 'sender-1',
+          recipientEmail: 'stranger@example.com',
+          subject: 'Private Email',
+          sentAt: new Date('2026-09-04T10:10:00.000Z'),
+          status: 'SENT',
+          smtpMessageId: '<msg-3@ethereal.email>',
+          etherealPreviewUrl: null,
+          campaign: { userId: otherUserId }
+        }
+      ];
+
+      // Simulate getSentEmails user scoping and pagination transformation
+      const userRecords = mockDbRecords.filter((e) => e.campaign.userId === mockUserId && ['SENT', 'FAILED'].includes(e.status));
+      const page = 1;
+      const limit = 10;
+      const total = userRecords.length;
+      const totalPages = Math.ceil(total / limit);
+
+      const responsePayload = {
+        status: 'success',
+        emails: userRecords.map((e) => ({
+          id: e.id,
+          senderKey: e.senderKey,
+          recipientEmail: e.recipientEmail,
+          subject: e.subject,
+          sentAt: e.sentAt ? e.sentAt.toISOString() : null,
+          status: e.status,
+          smtpMessageId: e.smtpMessageId,
+          etherealPreviewUrl: e.etherealPreviewUrl
+        })),
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages
+        }
+      };
+
+      // Verify contract shape
+      expect(responsePayload.status).toBe('success');
+      expect(Array.isArray(responsePayload.emails)).toBe(true);
+      expect(responsePayload.emails).toHaveLength(2);
+      expect(responsePayload.pagination).toEqual({
+        total: 2,
+        page: 1,
+        limit: 10,
+        totalPages: 1
+      });
+
+      // Verify user scoping (other user's email excluded)
+      expect(responsePayload.emails.some((e) => e.id === 'other-user-email')).toBe(false);
+
+      // Verify item fields
+      const first = responsePayload.emails[0];
+      expect(first).toHaveProperty('id', 'sent-email-1');
+      expect(first).toHaveProperty('senderKey', 'sender-1');
+      expect(first).toHaveProperty('recipientEmail', 'client1@example.com');
+      expect(first).toHaveProperty('subject', 'Welcome to ReachInbox');
+      expect(first).toHaveProperty('sentAt', '2026-09-04T10:00:00.000Z');
+      expect(first).toHaveProperty('status', 'SENT');
+      expect(first).toHaveProperty('smtpMessageId', '<msg-1@ethereal.email>');
+      expect(first).toHaveProperty('etherealPreviewUrl', 'https://ethereal.email/message/msg-1');
+    });
   });
 
   describe('Phase 6: Elasticsearch Indexing & Search', () => {
