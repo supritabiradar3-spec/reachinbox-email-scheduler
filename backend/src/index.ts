@@ -1,9 +1,19 @@
 import { createApp } from './app.js';
 import { config } from './config/env.js';
+import { connectSessionRedis } from './config/redis.js';
 
-const app = createApp();
+const startServer = async () => {
+  // Connect session Redis client before starting the server
+  await connectSessionRedis();
 
-app.listen(config.port, () => {
-  console.log(`[Backend] ReachInbox Scheduler API running on port ${config.port} (${config.nodeEnv})`);
-  console.log(`[Backend] Health check: http://localhost:${config.port}/api/health`);
+  const app = createApp();
+
+  app.listen(config.port, () => {
+    console.log(`[Backend] ReachInbox Scheduler API running on port ${config.port} (${config.nodeEnv})`);
+    console.log(`[Backend] Health check: http://localhost:${config.port}/api/health`);
+  });
+};
+
+startServer().catch((err) => {
+  console.error('[Backend] Failed to start server:', err);
 });

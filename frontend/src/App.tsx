@@ -1,353 +1,307 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Server, 
-  Database, 
-  Layers, 
-  Search, 
-  CheckCircle2, 
+  Mail, 
+  LogOut, 
+  AlertCircle, 
   RefreshCw, 
-  Activity, 
-  ShieldCheck, 
-  Terminal, 
-  Zap,
-  Mail
+  Calendar,
+  Clock,
+  Send
 } from 'lucide-react';
 
-interface HealthResponse {
-  status: string;
-  service: string;
-  phase: number;
-  environment: string;
-  uptimeSeconds: number;
-  timestamp: string;
+interface AuthUser {
+  name: string | null;
+  email: string;
+  avatarUrl: string | null;
+}
+
+function UserAvatar({ 
+  name, 
+  email, 
+  avatarUrl, 
+  size = 'md' 
+}: { 
+  name: string | null; 
+  email: string; 
+  avatarUrl: string | null; 
+  size?: 'sm' | 'md' | 'lg' 
+}): React.JSX.Element {
+  const [imgError, setImgError] = useState<boolean>(false);
+  const initial = (name || email || 'U').trim().charAt(0).toUpperCase();
+
+  const sizeClasses = {
+    sm: 'w-8 h-8 text-xs',
+    md: 'w-10 h-10 text-sm',
+    lg: 'w-16 h-16 text-xl'
+  }[size];
+
+  if (avatarUrl && !imgError) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={name || email}
+        onError={() => setImgError(true)}
+        className={`${sizeClasses} rounded-full object-cover border border-slate-700 shadow-sm`}
+      />
+    );
+  }
+
+  return (
+    <div className={`${sizeClasses} rounded-full bg-gradient-to-tr from-indigo-600 to-violet-600 flex items-center justify-center font-bold text-white shadow-md select-none`}>
+      {initial}
+    </div>
+  );
 }
 
 export default function App(): React.JSX.Element {
-  const [healthData, setHealthData] = useState<HealthResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastChecked, setLastChecked] = useState<string>('');
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = useState<boolean>(false);
+  const [redirectingToGoogle, setRedirectingToGoogle] = useState<boolean>(false);
 
-  const fetchHealth = async () => {
-    setLoading(true);
-    setError(null);
+  // Check Current Authentication State
+  const checkAuth = async () => {
+    setAuthChecking(true);
     try {
-      const response = await fetch('/api/health');
-      if (!response.ok) {
-        throw new Error(`HTTP error ${response.status}`);
+      const response = await fetch('/api/auth/me', {
+        credentials: 'include'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.user) {
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
+      } else {
+        setUser(null);
       }
-      const data: HealthResponse = await response.json();
-      setHealthData(data);
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to connect to backend';
-      setError(errorMessage);
-      setHealthData(null);
+    } catch {
+      setUser(null);
     } finally {
-      setLoading(false);
-      setLastChecked(new Date().toLocaleTimeString());
+      setAuthChecking(false);
     }
   };
 
   useEffect(() => {
-    fetchHealth();
+    // Check URL parameters for OAuth errors
+    const params = new URLSearchParams(window.location.search);
+    const errorParam = params.get('auth_error');
+    if (errorParam) {
+      if (errorParam === 'google_auth_failed') {
+        setAuthError('Google authentication was cancelled or failed. Please try again.');
+      } else {
+        setAuthError(`Authentication error: ${errorParam}`);
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    checkAuth();
   }, []);
+
+  const handleGoogleLogin = () => {
+    setRedirectingToGoogle(true);
+    setAuthError(null);
+    window.location.href = '/api/auth/google';
+  };
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      const response = await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include'
+      });
+      if (response.ok) {
+        setUser(null);
+      }
+    } catch (err) {
+      console.error('Logout failed:', err);
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
+  // Initial loading screen
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-100 font-sans">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
+            <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin" />
+          </div>
+          <p className="text-sm font-medium text-slate-400">Loading application...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Top Navigation */}
-      <header className="border-b border-slate-800/80 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+      {/* Navigation Bar */}
+      <header className="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          
+          {/* Logo & Title */}
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
               <Mail className="w-5 h-5 text-white" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <span className="font-bold text-lg text-white tracking-tight">ReachInbox</span>
-                <span className="text-xs bg-indigo-500/10 text-indigo-400 font-medium px-2 py-0.5 rounded-full border border-indigo-500/20">
-                  Phase 1 Ready
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">Email Scheduler &amp; Background Dispatcher</p>
+              <span className="font-bold text-lg text-white tracking-tight">ReachInbox</span>
+              <p className="text-xs text-slate-400">Email Scheduler</p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-4">
-            <button
-              onClick={fetchHealth}
-              disabled={loading}
-              className="inline-flex items-center space-x-2 px-3.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700 transition disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-indigo-400' : ''}`} />
-              <span>Refresh Health</span>
-            </button>
-            <div className="flex items-center space-x-2 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800 text-xs text-slate-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>Local Dev Active</span>
+          {/* User Profile & Single Logout Button */}
+          {user && (
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-3">
+                <UserAvatar 
+                  name={user.name} 
+                  email={user.email} 
+                  avatarUrl={user.avatarUrl} 
+                  size="sm" 
+                />
+                <div className="hidden sm:block text-left">
+                  <p className="text-xs font-semibold text-slate-200">{user.name || user.email}</p>
+                  <p className="text-[11px] text-slate-400">{user.email}</p>
+                </div>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                disabled={loggingOut}
+                id="logout-btn"
+                className="inline-flex items-center space-x-2 px-3.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700 transition disabled:opacity-50"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>{loggingOut ? 'Signing out...' : 'Sign Out'}</span>
+              </button>
             </div>
-          </div>
+          )}
+
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col justify-center">
         
-        {/* Hero Banner */}
-        <section className="relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900/90 to-slate-950 p-8 shadow-2xl">
-          <div className="absolute top-0 right-0 -mr-16 -mt-16 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
-          <div className="relative z-10 space-y-4 max-w-3xl">
-            <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-950/60 border border-indigo-700/40 text-indigo-300 text-xs font-medium">
-              <Zap className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Phase 1: Project Setup &amp; Architecture Foundation</span>
-            </div>
-            <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
-              ReachInbox Email Scheduler
-            </h1>
-            <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-              Monorepo setup with Express.js, TypeScript, React Vite, Tailwind CSS, Prisma ORM (MySQL 8), Redis, and Elasticsearch running via Docker Compose.
-            </p>
-          </div>
-        </section>
-
-        {/* Live Service Status Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          
-          {/* Backend Express API */}
-          <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/60 flex flex-col justify-between space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="p-2 rounded-lg bg-indigo-950/70 border border-indigo-800/40 text-indigo-400">
-                <Server className="w-5 h-5" />
-              </div>
-              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                healthData?.status === 'ok' 
-                  ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/40' 
-                  : error 
-                  ? 'bg-rose-950/80 text-rose-300 border border-rose-700/40' 
-                  : 'bg-amber-950/80 text-amber-300 border border-amber-700/40'
-              }`}>
-                {healthData?.status === 'ok' ? 'Connected (200)' : error ? 'Disconnected' : 'Checking...'}
-              </span>
-            </div>
-            <div>
-              <h3 className="font-semibold text-slate-100 text-sm">Express Backend</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Port 5000 • TypeScript</p>
-            </div>
-            <div className="pt-2 border-t border-slate-800/70 text-[11px] text-slate-400 flex justify-between">
-              <span>Endpoint: <code className="text-slate-300">/api/health</code></span>
-              <span>{lastChecked ? `Checked: ${lastChecked}` : ''}</span>
-            </div>
-          </div>
-
-          {/* MySQL 8.0 & Prisma */}
-          <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/60 flex flex-col justify-between space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="p-2 rounded-lg bg-blue-950/70 border border-blue-800/40 text-blue-400">
-                <Database className="w-5 h-5" />
-              </div>
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-700/40">
-                Configured
-              </span>
-            </div>
-            <div>
-              <h3 className="font-semibold text-slate-100 text-sm">MySQL 8.0 &amp; Prisma</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Port 3307 • reachinbox_scheduler</p>
-            </div>
-            <div className="pt-2 border-t border-slate-800/70 text-[11px] text-slate-400 flex justify-between">
-              <span>ORM: <code className="text-slate-300">Prisma Client</code></span>
-              <span>Volume: <code className="text-slate-300">mysql_data</code></span>
-            </div>
-          </div>
-
-          {/* Redis & BullMQ */}
-          <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/60 flex flex-col justify-between space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="p-2 rounded-lg bg-red-950/70 border border-red-800/40 text-red-400">
-                <Layers className="w-5 h-5" />
-              </div>
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-700/40">
-                Ready
-              </span>
-            </div>
-            <div>
-              <h3 className="font-semibold text-slate-100 text-sm">Redis 7 &amp; BullMQ</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Port 6379 • Bull Queue</p>
-            </div>
-            <div className="pt-2 border-t border-slate-800/70 text-[11px] text-slate-400 flex justify-between">
-              <span>Mode: <code className="text-slate-300">AOF Enabled</code></span>
-              <span>Volume: <code className="text-slate-300">redis_data</code></span>
-            </div>
-          </div>
-
-          {/* Elasticsearch */}
-          <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/60 flex flex-col justify-between space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="p-2 rounded-lg bg-amber-950/70 border border-amber-800/40 text-amber-400">
-                <Search className="w-5 h-5" />
-              </div>
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-700/40">
-                Ready
-              </span>
-            </div>
-            <div>
-              <h3 className="font-semibold text-slate-100 text-sm">Elasticsearch 8</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Port 9200 • Single-Node</p>
-            </div>
-            <div className="pt-2 border-t border-slate-800/70 text-[11px] text-slate-400 flex justify-between">
-              <span>Cluster: <code className="text-slate-300">Single Node</code></span>
-              <span>Volume: <code className="text-slate-300">es_data</code></span>
-            </div>
-          </div>
-
-        </div>
-
-        {/* Phase 1 Deliverables Checklist & Architecture Details */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Phase 1 Verification Checklist */}
-          <div className="lg:col-span-2 p-6 rounded-xl border border-slate-800 bg-slate-900/50 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center space-x-2">
-                <ShieldCheck className="w-5 h-5 text-indigo-400" />
-                <h2 className="text-base font-semibold text-white">Phase 1 Requirements Checklist</h2>
-              </div>
-              <span className="text-xs bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded-md border border-emerald-500/20 font-medium">
-                10 / 10 Completed
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-300">
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Monorepo Folder Structure</p>
-                  <p className="text-slate-500 text-[11px]">Clean separation of backend &amp; frontend</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">TypeScript Configurations</p>
-                  <p className="text-slate-500 text-[11px]">Strict tsconfig for backend &amp; frontend</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">React + Vite + Tailwind CSS</p>
-                  <p className="text-slate-500 text-[11px]">Fast build tooling &amp; utility styling</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Express Health-Check API</p>
-                  <p className="text-slate-500 text-[11px]">GET /api/health with status &amp; uptime</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Prisma ORM for MySQL</p>
-                  <p className="text-slate-500 text-[11px]">schema.prisma configured for MySQL 8</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Docker Compose Setup</p>
-                  <p className="text-slate-500 text-[11px]">MySQL 8.0, Redis 7, Elasticsearch 8</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Volumes &amp; Health Checks</p>
-                  <p className="text-slate-500 text-[11px]">Persistent data &amp; docker health probes</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Safe .env &amp; .gitignore</p>
-                  <p className="text-slate-500 text-[11px]">No credentials committed; templates provided</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Workspaces &amp; NPM Scripts</p>
-                  <p className="text-slate-500 text-[11px]">dev, dev:backend, dev:frontend, worker</p>
-                </div>
-              </div>
-
-              <div className="flex items-start space-x-2 p-2.5 rounded-lg bg-slate-950/50 border border-slate-800/80">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-slate-200">Phase 1 README Documentation</p>
-                  <p className="text-slate-500 text-[11px]">Setup instructions &amp; verification steps</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Commands Reference */}
-          <div className="p-6 rounded-xl border border-slate-800 bg-slate-900/50 space-y-4">
-            <div className="flex items-center space-x-2 pb-3 border-b border-slate-800">
-              <Terminal className="w-5 h-5 text-indigo-400" />
-              <h2 className="text-base font-semibold text-white">NPM Scripts</h2>
-            </div>
+        {/* Unauthenticated View: Clean Login Page */}
+        {!user ? (
+          <div className="max-w-md w-full mx-auto my-auto space-y-6">
             
-            <div className="space-y-2 text-xs font-mono">
-              <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                <span className="text-slate-500"># Start Docker Services</span>
-                <p className="text-indigo-300">npm run docker:up</p>
+            <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 backdrop-blur-md p-8 shadow-2xl space-y-6">
+              <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
+
+              <div className="text-center space-y-2">
+                <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-xl shadow-indigo-500/20 mb-4">
+                  <Mail className="w-7 h-7 text-white" />
+                </div>
+                <h1 className="text-2xl font-extrabold text-white tracking-tight">
+                  ReachInbox Email Scheduler
+                </h1>
+                <p className="text-sm text-slate-400">
+                  Sign in with your Google account to manage scheduled emails
+                </p>
               </div>
 
-              <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                <span className="text-slate-500"># Start Dev (Fullstack)</span>
-                <p className="text-indigo-300">npm run dev</p>
+              {/* Error Message Alert */}
+              {authError && (
+                <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/60 text-rose-300 text-xs flex items-start space-x-2.5">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold">Sign In Failed</p>
+                    <p className="mt-0.5 text-rose-300/90">{authError}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Google OAuth Button */}
+              <div className="pt-2">
+                <button
+                  id="google-login-btn"
+                  onClick={handleGoogleLogin}
+                  disabled={redirectingToGoogle}
+                  className="w-full flex items-center justify-center space-x-3 px-5 py-3.5 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-semibold text-sm transition-all duration-200 shadow-lg shadow-white/5 hover:shadow-white/10 active:scale-[0.99] disabled:opacity-60"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                    />
+                  </svg>
+                  <span>{redirectingToGoogle ? 'Redirecting to Google...' : 'Continue with Google'}</span>
+                </button>
               </div>
 
-              <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                <span className="text-slate-500"># Run Type Checks</span>
-                <p className="text-indigo-300">npm run typecheck</p>
-              </div>
-
-              <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                <span className="text-slate-500"># Start Worker</span>
-                <p className="text-indigo-300">npm run dev:worker</p>
-              </div>
             </div>
+
           </div>
-
-        </div>
-
-        {/* Live Backend Response Inspector */}
-        {healthData && (
-          <section className="p-5 rounded-xl border border-slate-800/80 bg-slate-900/40 space-y-3">
-            <div className="flex items-center space-x-2 text-xs font-semibold text-slate-300 uppercase tracking-wider">
-              <Activity className="w-4 h-4 text-emerald-400" />
-              <span>Live Health API Response (GET /api/health)</span>
+        ) : (
+          /* Authenticated View: Clean Dashboard Placeholder */
+          <div className="space-y-6">
+            
+            {/* Welcome Banner */}
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8 flex items-center space-x-5">
+              <UserAvatar 
+                name={user.name} 
+                email={user.email} 
+                avatarUrl={user.avatarUrl} 
+                size="lg" 
+              />
+              <div className="space-y-1">
+                <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                  Welcome back{user.name ? `, ${user.name}` : ''}
+                </h1>
+                <p className="text-sm text-slate-400">{user.email}</p>
+              </div>
             </div>
-            <pre className="p-4 rounded-lg bg-slate-950 border border-slate-800/90 text-xs font-mono text-emerald-400 overflow-x-auto">
-              {JSON.stringify(healthData, null, 2)}
-            </pre>
-          </section>
+
+            {/* Dashboard Placeholder */}
+            <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/30 p-12 text-center space-y-4">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400">
+                <Clock className="w-6 h-6" />
+              </div>
+              <div className="max-w-md mx-auto space-y-2">
+                <h2 className="text-base font-semibold text-white">Email Scheduler Dashboard</h2>
+                <p className="text-sm text-slate-400">
+                  Your scheduled emails, delivery queues, and dispatch logs will appear here.
+                </p>
+              </div>
+              <div className="pt-4 flex items-center justify-center space-x-6 text-xs text-slate-500">
+                <span className="flex items-center space-x-1.5">
+                  <Calendar className="w-4 h-4 text-slate-400" />
+                  <span>Scheduled Queues</span>
+                </span>
+                <span className="flex items-center space-x-1.5">
+                  <Send className="w-4 h-4 text-slate-400" />
+                  <span>Email Dispatcher</span>
+                </span>
+              </div>
+            </div>
+
+          </div>
         )}
 
       </main>
 
       {/* Footer */}
       <footer className="border-t border-slate-800/70 bg-slate-950 py-4 mt-auto text-center text-xs text-slate-500">
-        ReachInbox Software Development Intern Assignment • Phase 1
+        ReachInbox Email Scheduler
       </footer>
     </div>
   );
