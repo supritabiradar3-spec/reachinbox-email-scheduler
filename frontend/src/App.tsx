@@ -4,10 +4,13 @@ import {
   LogOut, 
   AlertCircle, 
   RefreshCw, 
-  Calendar,
+  Plus,
   Clock,
-  Send
+  Send,
+  CalendarClock,
+  Inbox
 } from 'lucide-react';
+import { ComposeModal } from './components/ComposeModal';
 
 interface AuthUser {
   name: string | null;
@@ -32,7 +35,7 @@ function UserAvatar({
   const sizeClasses = {
     sm: 'w-8 h-8 text-xs',
     md: 'w-10 h-10 text-sm',
-    lg: 'w-16 h-16 text-xl'
+    lg: 'w-14 h-14 text-lg'
   }[size];
 
   if (avatarUrl && !imgError) {
@@ -60,6 +63,10 @@ export default function App(): React.JSX.Element {
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
   const [redirectingToGoogle, setRedirectingToGoogle] = useState<boolean>(false);
 
+  // Phase 3 Dashboard State
+  const [activeTab, setActiveTab] = useState<'scheduled' | 'sent'>('scheduled');
+  const [isComposeOpen, setIsComposeOpen] = useState<boolean>(false);
+
   // Check Current Authentication State
   const checkAuth = async () => {
     setAuthChecking(true);
@@ -85,7 +92,6 @@ export default function App(): React.JSX.Element {
   };
 
   useEffect(() => {
-    // Check URL parameters for OAuth errors
     const params = new URLSearchParams(window.location.search);
     const errorParam = params.get('auth_error');
     if (errorParam) {
@@ -139,8 +145,8 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Navigation Bar */}
-      <header className="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
+      {/* Navigation Header */}
+      <header className="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           
           {/* Logo & Title */}
@@ -154,7 +160,7 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
 
-          {/* User Profile & Single Logout Button */}
+          {/* User Profile & Logout */}
           {user && (
             <div className="flex items-center space-x-4">
               <div className="flex items-center space-x-3">
@@ -186,12 +192,11 @@ export default function App(): React.JSX.Element {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col justify-center">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col">
         
         {/* Unauthenticated View: Clean Login Page */}
         {!user ? (
           <div className="max-w-md w-full mx-auto my-auto space-y-6">
-            
             <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 backdrop-blur-md p-8 shadow-2xl space-y-6">
               <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
 
@@ -207,7 +212,6 @@ export default function App(): React.JSX.Element {
                 </p>
               </div>
 
-              {/* Error Message Alert */}
               {authError && (
                 <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/60 text-rose-300 text-xs flex items-start space-x-2.5">
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
@@ -218,7 +222,6 @@ export default function App(): React.JSX.Element {
                 </div>
               )}
 
-              {/* Google OAuth Button */}
               <div className="pt-2">
                 <button
                   id="google-login-btn"
@@ -247,51 +250,106 @@ export default function App(): React.JSX.Element {
                   <span>{redirectingToGoogle ? 'Redirecting to Google...' : 'Continue with Google'}</span>
                 </button>
               </div>
-
             </div>
-
           </div>
         ) : (
-          /* Authenticated View: Clean Dashboard Placeholder */
+          /* Authenticated Dashboard */
           <div className="space-y-6">
             
-            {/* Welcome Banner */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8 flex items-center space-x-5">
-              <UserAvatar 
-                name={user.name} 
-                email={user.email} 
-                avatarUrl={user.avatarUrl} 
-                size="lg" 
-              />
-              <div className="space-y-1">
+            {/* Dashboard Action Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900/60 border border-slate-800 p-6 rounded-2xl">
+              <div>
                 <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-                  Welcome back{user.name ? `, ${user.name}` : ''}
+                  Email Scheduler Dashboard
                 </h1>
-                <p className="text-sm text-slate-400">{user.email}</p>
-              </div>
-            </div>
-
-            {/* Dashboard Placeholder */}
-            <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/30 p-12 text-center space-y-4">
-              <div className="w-12 h-12 mx-auto rounded-2xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400">
-                <Clock className="w-6 h-6" />
-              </div>
-              <div className="max-w-md mx-auto space-y-2">
-                <h2 className="text-base font-semibold text-white">Email Scheduler Dashboard</h2>
-                <p className="text-sm text-slate-400">
-                  Your scheduled emails, delivery queues, and dispatch logs will appear here.
+                <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
+                  Compose, schedule batches, and monitor dispatch queues
                 </p>
               </div>
-              <div className="pt-4 flex items-center justify-center space-x-6 text-xs text-slate-500">
-                <span className="flex items-center space-x-1.5">
-                  <Calendar className="w-4 h-4 text-slate-400" />
-                  <span>Scheduled Queues</span>
-                </span>
-                <span className="flex items-center space-x-1.5">
-                  <Send className="w-4 h-4 text-slate-400" />
-                  <span>Email Dispatcher</span>
-                </span>
+
+              {/* Primary "Compose New Email" Button */}
+              <button
+                id="compose-email-btn"
+                onClick={() => setIsComposeOpen(true)}
+                className="inline-flex items-center justify-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition active:scale-[0.98]"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Compose New Email</span>
+              </button>
+            </div>
+
+            {/* Dashboard Tabs & Content Area */}
+            <div className="bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+              
+              {/* Tab Navigation */}
+              <div className="border-b border-slate-800 px-6 pt-4 flex space-x-8">
+                <button
+                  id="tab-scheduled-emails"
+                  onClick={() => setActiveTab('scheduled')}
+                  className={`pb-3 text-xs sm:text-sm font-semibold flex items-center space-x-2 border-b-2 transition ${
+                    activeTab === 'scheduled'
+                      ? 'border-indigo-500 text-indigo-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <CalendarClock className="w-4 h-4" />
+                  <span>Scheduled Emails</span>
+                </button>
+
+                <button
+                  id="tab-sent-emails"
+                  onClick={() => setActiveTab('sent')}
+                  className={`pb-3 text-xs sm:text-sm font-semibold flex items-center space-x-2 border-b-2 transition ${
+                    activeTab === 'sent'
+                      ? 'border-indigo-500 text-indigo-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Send className="w-4 h-4" />
+                  <span>Sent Emails</span>
+                </button>
               </div>
+
+              {/* Tab Panels */}
+              <div className="p-8 sm:p-12">
+                {activeTab === 'scheduled' ? (
+                  /* Scheduled Emails Tab */
+                  <div className="text-center space-y-4 max-w-md mx-auto py-4">
+                    <div className="w-12 h-12 mx-auto rounded-2xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400">
+                      <Clock className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <h3 className="text-base font-semibold text-white">No Scheduled Emails</h3>
+                      <p className="text-xs text-slate-400">
+                        You have no emails waiting in the schedule queue. Click "Compose New Email" to set up your next email campaign.
+                      </p>
+                    </div>
+                    <div className="pt-2">
+                      <button
+                        onClick={() => setIsComposeOpen(true)}
+                        className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium border border-slate-700 transition"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Schedule Your First Email</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* Sent Emails Tab */
+                  <div className="text-center space-y-4 max-w-md mx-auto py-4">
+                    <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-950/60 border border-emerald-800/40 flex items-center justify-center text-emerald-400">
+                      <Inbox className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <h3 className="text-base font-semibold text-white">No Sent Emails Yet</h3>
+                      <p className="text-xs text-slate-400">
+                        Dispatched emails and delivery logs will be listed here after being processed by the background worker.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
             </div>
 
           </div>
@@ -299,9 +357,15 @@ export default function App(): React.JSX.Element {
 
       </main>
 
+      {/* Compose Email Modal */}
+      <ComposeModal 
+        isOpen={isComposeOpen} 
+        onClose={() => setIsComposeOpen(false)} 
+      />
+
       {/* Footer */}
       <footer className="border-t border-slate-800/70 bg-slate-950 py-4 mt-auto text-center text-xs text-slate-500">
-        ReachInbox Email Scheduler
+        ReachInbox Email Scheduler • Phase 3 Compose &amp; File Parser
       </footer>
     </div>
   );
