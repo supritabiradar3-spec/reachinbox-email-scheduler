@@ -11,17 +11,18 @@ import {
   Trash2, 
   ChevronDown, 
   ChevronUp, 
-  Info,
-  SendHorizontal
+  SendHorizontal,
+  Loader2
 } from 'lucide-react';
 import { parseRecipientFile, ParseResult } from '../utils/recipientParser';
 
 interface ComposeModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onSuccess: () => void;
 }
 
-export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.Element | null {
+export function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModalProps): React.JSX.Element | null {
   // Form States
   const [subject, setSubject] = useState<string>('');
   const [body, setBody] = useState<string>('');
@@ -36,24 +37,25 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
   const [delaySeconds, setDelaySeconds] = useState<number>(5);
   const [hourlyLimit, setHourlyLimit] = useState<number>(100);
 
-  // Submission Status Notice
-  const [scheduleNotice, setScheduleNotice] = useState<string | null>(null);
+  // Submission Status
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>('');
 
   // File Input Ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Set default start time to 5 minutes from now in local ISO format (YYYY-MM-DDTHH:mm)
+  // Set default start time to 5 minutes from now and generate idempotency key
   useEffect(() => {
     if (isOpen) {
       const now = new Date();
       now.setMinutes(now.getMinutes() + 5);
-      // Format to YYYY-MM-DDTHH:mm
       const localISO = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
         .toISOString()
         .slice(0, 16);
       setStartTime(localISO);
-      setScheduleNotice(null);
+      setSubmitError(null);
+      setIdempotencyKey(`idemp-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
     }
   }, [isOpen]);
 
@@ -98,6 +100,20 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
     }
   };
 
+  const resetForm = () => {
+    setSubject('');
+    setBody('');
+    setSelectedFile(null);
+    setParseResult(null);
+    setFileError(null);
+    setSubmitError(null);
+    setShowRecipientDetails(false);
+    setIsSubmitting(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   // Validation Logic
   const isStartTimeValid = Boolean(startTime && !isNaN(new Date(startTime).getTime()) && new Date(startTime).getTime() > Date.now() - 60000);
   const isDelayValid = delaySeconds > 0 && !isNaN(delaySeconds);
@@ -115,17 +131,47 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
     !isParsing;
 
   // Handle Schedule Submit
-  const handleScheduleSubmit = (e: React.FormEvent) => {
+  const handleScheduleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isFormValid) return;
+    if (!isFormValid || !parseResult) return;
 
     setIsSubmitting(true);
-    // Requirement 7: The Schedule button must not fake success.
-    // Clearly state that the scheduler API is not connected yet (Phase 4 BullMQ implementation).
-    setScheduleNotice(
-      `Form validated successfully for ${parseResult?.valid.length} recipient(s). Note: Background dispatch queue (BullMQ & Redis) will be activated in Phase 4.`
-    );
-    setIsSubmitting(false);
+    setSubmitError(null);
+
+    try {
+      const response = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          subject: subject.trim(),
+          body: body.trim(),
+          recipients: parseResult.valid,
+          startTime: new Date(startTime).toISOString(),
+          delaySeconds: Number(delaySeconds),
+          hourlyLimit: Number(hourlyLimit)
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || `Failed to schedule campaign (HTTP ${response.status})`);
+      }
+
+      // Success
+      resetForm();
+      onSuccess();
+      onClose();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An unexpected error occurred';
+      setSubmitError(message);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -143,7 +189,8 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition"
+            disabled={isSubmitting}
+            className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition disabled:opacity-50"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />
@@ -153,14 +200,14 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
         {/* Modal Body / Form */}
         <form onSubmit={handleScheduleSubmit} className="p-6 space-y-5">
           
-          {/* Informative Schedule Notice */}
-          {scheduleNotice && (
-            <div className="p-4 rounded-xl bg-indigo-950/80 border border-indigo-700/60 text-indigo-200 text-xs space-y-1.5 animate-fadeIn">
-              <div className="flex items-center space-x-2 font-semibold text-indigo-300">
-                <Info className="w-4 h-4 text-indigo-400 shrink-0" />
-                <span>Phase 3 Validation Passed</span>
+          {/* Submit Error Alert */}
+          {submitError && (
+            <div className="p-3.5 rounded-xl bg-rose-950/70 border border-rose-800/70 text-rose-300 text-xs flex items-start space-x-2.5 animate-fadeIn">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">Scheduling Error</p>
+                <p className="mt-0.5 text-rose-300/90">{submitError}</p>
               </div>
-              <p className="text-slate-300">{scheduleNotice}</p>
             </div>
           )}
 
@@ -249,6 +296,7 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
                   <button
                     type="button"
                     onClick={handleRemoveFile}
+                    disabled={isSubmitting}
                     className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-950/30 rounded-lg transition"
                     title="Remove file"
                   >
@@ -397,7 +445,8 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-xl border border-slate-700 transition"
+              disabled={isSubmitting}
+              className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-xl border border-slate-700 transition disabled:opacity-50"
             >
               Cancel
             </button>
@@ -407,8 +456,17 @@ export function ComposeModal({ isOpen, onClose }: ComposeModalProps): React.JSX.
               id="schedule-submit-btn"
               className="inline-flex items-center space-x-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 rounded-xl shadow-lg shadow-indigo-600/20 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <SendHorizontal className="w-4 h-4" />
-              <span>Schedule Email</span>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Scheduling...</span>
+                </>
+              ) : (
+                <>
+                  <SendHorizontal className="w-4 h-4" />
+                  <span>Schedule Email</span>
+                </>
+              )}
             </button>
           </div>
 

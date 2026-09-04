@@ -7,6 +7,14 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum EmailStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+  RATE_LIMITED
+}
+
 model User {
   id        String   @id @default(uuid())
   googleId  String   @unique @map("google_id")
@@ -16,5 +24,50 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  campaigns EmailCampaign[]
+
   @@map("users")
+}
+
+model EmailCampaign {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  subject        String   @db.VarChar(255)
+  body           String   @db.Text
+  startTime      DateTime @map("start_time")
+  delaySeconds   Int      @map("delay_seconds")
+  hourlyLimit    Int      @map("hourly_limit")
+  recipientCount Int      @map("recipient_count")
+  idempotencyKey String   @map("idempotency_key")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails ScheduledEmail[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@map("email_campaigns")
+}
+
+model ScheduledEmail {
+  id             String      @id @default(uuid())
+  campaignId     String      @map("campaign_id")
+  recipientEmail String      @map("recipient_email") @db.VarChar(255)
+  subject        String      @db.VarChar(255)
+  body           String      @db.Text
+  scheduledAt    DateTime    @map("scheduled_at")
+  sentAt         DateTime?   @map("sent_at")
+  status         EmailStatus @default(SCHEDULED)
+  bullmqJobId    String?     @unique @map("bullmq_job_id")
+  errorMessage   String?     @map("error_message") @db.Text
+  attemptCount   Int         @default(0) @map("attempt_count")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  campaign EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([status, scheduledAt])
+  @@map("scheduled_emails")
 }

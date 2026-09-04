@@ -8,6 +8,8 @@ import { sessionRedisClient } from './config/redis.js';
 import { configurePassport } from './config/passport.js';
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
+import campaignRoutes from './routes/campaign.routes.js';
+import emailRoutes from './routes/email.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -58,13 +60,15 @@ export const createApp = (): Express => {
   // API Routes
   app.use('/api', healthRoutes);
   app.use('/api/auth', authRoutes);
+  app.use('/api/campaigns', campaignRoutes);
+  app.use('/api/emails', emailRoutes);
 
   // Root endpoint info
   app.get('/', (_req: Request, res: Response) => {
     res.json({
       name: 'ReachInbox Email Scheduler API',
       version: '1.0.0',
-      phase: 2,
+      phase: 4,
       status: 'active',
       endpoints: {
         health: '/api/health',
@@ -73,6 +77,13 @@ export const createApp = (): Express => {
           googleCallback: '/api/auth/google/callback',
           me: '/api/auth/me',
           logout: '/api/auth/logout'
+        },
+        campaigns: {
+          create: 'POST /api/campaigns'
+        },
+        emails: {
+          scheduled: 'GET /api/emails/scheduled',
+          sent: 'GET /api/emails/sent'
         }
       }
     });
