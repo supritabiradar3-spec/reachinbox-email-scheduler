@@ -4,6 +4,7 @@ import { prisma } from './config/prisma.js';
 import { getConfiguredSenders } from './config/senders.config.js';
 import { EMAIL_QUEUE_NAME } from './queues/email.queue.js';
 import { sendEmail, verifyAllTransporters, sanitizeError } from './services/email.service.js';
+import { indexSentEmail, ensureSentEmailsIndex } from './services/elasticsearch.service.js';
 
 // Pre-flight check: Fail fast if no valid Ethereal SMTP senders are configured
 const configuredSenders = getConfiguredSenders();
@@ -107,6 +108,13 @@ export const processEmailJob = async (job: Job<EmailJobData>): Promise<void> => 
     });
 
     console.log(`[Worker] Email ${emailId} sent successfully via [${emailRecord.senderKey}]. Preview: ${result.etherealPreviewUrl || 'N/A'}`);
+
+    // 5b. Index sent email into Elasticsearch (non-fatal if indexing fails, never resends email)
+    try {
+      await indexSentEmail(emailId);
+    } catch (esErr: unknown) {
+      console.warn(`[Worker] Elasticsearch indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
+    }
   } catch (error: unknown) {
     const sanitizedErrMsg = sanitizeError(error);
     const maxAttempts = job.opts.attempts || 3;
@@ -155,6 +163,7 @@ export const emailWorker = new Worker<EmailJobData>(
 emailWorker.on('ready', async () => {
   console.log('[Worker] Worker connected to Redis and ready to process jobs.');
   await verifyAllTransporters();
+  await ensureSentEmailsIndex();
 });
 
 emailWorker.on('completed', (job: Job) => {

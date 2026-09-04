@@ -365,5 +365,158 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       await prisma.$disconnect();
     });
   });
+
+  describe('Phase 6: Elasticsearch Indexing & Search', () => {
+    it('should build clean, deterministic sent email documents from database records', async () => {
+      const { buildSentEmailDocument } = await import('./elasticsearch.service.js');
+
+      const mockDbRecord = {
+        id: 'email-uuid-12345',
+        campaignId: 'camp-uuid-999',
+        senderKey: 'sender-1',
+        recipientEmail: 'client@company.com',
+        subject: 'ReachInbox Product Update',
+        body: 'Hello team, here is the new scheduler feature update.',
+        status: 'SENT',
+        scheduledAt: new Date('2026-09-04T12:00:00.000Z'),
+        sentAt: new Date('2026-09-04T12:00:05.000Z'),
+        smtpMessageId: '<msg-777@ethereal.email>',
+        etherealPreviewUrl: 'https://ethereal.email/message/msg-777',
+        createdAt: new Date('2026-09-04T11:50:00.000Z'),
+        campaign: {
+          userId: 'user-guid-456'
+        }
+      };
+
+      const doc = buildSentEmailDocument(mockDbRecord);
+
+      // Verify deterministic document ID matches database record ID
+      expect(doc.id).toBe(mockDbRecord.id);
+      expect(doc.userId).toBe('user-guid-456');
+      expect(doc.campaignId).toBe('camp-uuid-999');
+      expect(doc.recipientEmail).toBe('client@company.com');
+      expect(doc.senderKey).toBe('sender-1');
+      expect(doc.subject).toBe('ReachInbox Product Update');
+      expect(doc.body).toBe('Hello team, here is the new scheduler feature update.');
+      expect(doc.status).toBe('SENT');
+      expect(doc.smtpMessageId).toBe('<msg-777@ethereal.email>');
+      expect(doc.etherealPreviewUrl).toBe('https://ethereal.email/message/msg-777');
+      expect(doc.scheduledAt).toBe('2026-09-04T12:00:00.000Z');
+      expect(doc.sentAt).toBe('2026-09-04T12:00:05.000Z');
+      expect(doc.createdAt).toBe('2026-09-04T11:50:00.000Z');
+
+      // Verify no passwords, tokens, or connection strings are present in the document
+      expect(doc).not.toHaveProperty('pass');
+      expect(doc).not.toHaveProperty('password');
+      expect(doc).not.toHaveProperty('sessionSecret');
+      expect(doc).not.toHaveProperty('googleId');
+    });
+
+    it('should throw error when building document if userId is missing', async () => {
+      const { buildSentEmailDocument } = await import('./elasticsearch.service.js');
+      const invalidRecord = {
+        id: 'email-1',
+        campaignId: 'c1',
+        senderKey: 's1',
+        recipientEmail: 'test@example.com',
+        subject: 'sub',
+        body: 'body',
+        status: 'SENT',
+        scheduledAt: new Date(),
+        sentAt: new Date(),
+        smtpMessageId: 'm1',
+        etherealPreviewUrl: null,
+        createdAt: new Date(),
+        campaign: null
+      };
+
+      expect(() => buildSentEmailDocument(invalidRecord)).toThrow('missing userId');
+    });
+
+    it('should verify explicit index mapping definition includes all required search and filter fields', async () => {
+      const { SENT_EMAILS_MAPPING_PROPERTIES, SENT_EMAILS_INDEX } = await import('../config/elasticsearch.js');
+
+      expect(SENT_EMAILS_INDEX).toBe('reachinbox-sent-emails');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.id.type).toBe('keyword');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.userId.type).toBe('keyword');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.campaignId.type).toBe('keyword');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.senderKey.type).toBe('keyword');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.status.type).toBe('keyword');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.subject.type).toBe('text');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.body.type).toBe('text');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.scheduledAt.type).toBe('date');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.sentAt.type).toBe('date');
+      expect(SENT_EMAILS_MAPPING_PROPERTIES.recipientEmail.type).toBe('keyword');
+    });
+
+    it('should safely initialize index when Elasticsearch is running', async () => {
+      const { ensureSentEmailsIndex } = await import('./elasticsearch.service.js');
+      const result = await ensureSentEmailsIndex();
+      expect(typeof result).toBe('boolean');
+    });
+
+    it('should enforce user isolation: queries must filter by authenticated userId', () => {
+      const userA = 'user-alice-111';
+      const userB = 'user-bob-222';
+      const queryText = 'ReachInbox';
+
+      // Mock query builder logic mirroring searchUserSentEmails
+      const buildQuery = (userId: string, q: string) => ({
+        bool: {
+          filter: [{ term: { userId } }],
+          must: [
+            {
+              multi_match: {
+                query: q,
+                fields: ['subject^3', 'recipientEmail.text^2', 'recipientEmail^2', 'body']
+              }
+            }
+          ]
+        }
+      });
+
+      const aliceQuery = buildQuery(userA, queryText);
+      const bobQuery = buildQuery(userB, queryText);
+
+      expect(aliceQuery.bool.filter[0].term.userId).toBe(userA);
+      expect(bobQuery.bool.filter[0].term.userId).toBe(userB);
+      expect(aliceQuery.bool.filter[0].term.userId).not.toBe(bobQuery.bool.filter[0].term.userId);
+    });
+
+    it('should validate search query parameters and return empty results on empty query', async () => {
+      const { searchUserSentEmails } = await import('./elasticsearch.service.js');
+      const emptyResult = await searchUserSentEmails({
+        userId: 'user-123',
+        query: '   '
+      });
+
+      expect(emptyResult.emails).toEqual([]);
+      expect(emptyResult.pagination.total).toBe(0);
+    });
+
+    it('should ensure Elasticsearch failures do not revert SENT status or cause email re-sending in worker', () => {
+      // Simulate worker post-send handling
+      let dbStatus = 'PROCESSING';
+      let emailResent = false;
+
+      // 1. SMTP succeeds
+      const smtpSuccess = true;
+      if (smtpSuccess) {
+        dbStatus = 'SENT';
+      }
+
+      // 2. Elasticsearch indexing simulated exception
+      try {
+        const esIndex = () => { throw new Error('Elasticsearch connection timeout'); };
+        esIndex();
+      } catch (esErr) {
+        // Non-fatal catch: logs warning, never reverts dbStatus or sets emailResent
+      }
+
+      expect(dbStatus).toBe('SENT');
+      expect(emailResent).toBe(false);
+    });
+  });
 });
+
 

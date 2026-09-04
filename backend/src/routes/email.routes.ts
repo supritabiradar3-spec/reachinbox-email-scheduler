@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
-import { getScheduledEmails, getSentEmails } from '../controllers/email.controller.js';
+import { getScheduledEmails, getSentEmails, searchSentEmails } from '../controllers/email.controller.js';
 
 const router = Router();
 
@@ -10,4 +10,8 @@ router.get('/scheduled', requireAuth, getScheduledEmails);
 // GET /api/emails/sent - Get paginated sent emails
 router.get('/sent', requireAuth, getSentEmails);
 
+// GET /api/emails/search - Full-text search sent emails via Elasticsearch
+router.get('/search', requireAuth, searchSentEmails);
+
 export default router;
+
