@@ -2,7 +2,12 @@ import { createApp } from './app.js';
 import { config } from './config/env.js';
 import { connectSessionRedis } from './config/redis.js';
 import { reconcileScheduledEmails } from './services/reconciliation.service.js';
-import { ensureSentEmailsIndex, backfillSentEmailsToIndex } from './services/elasticsearch.service.js';
+import {
+  ensureSentEmailsIndex,
+  backfillSentEmailsToIndex,
+  ensureScheduledEmailsIndex,
+  backfillScheduledEmailsToIndex
+} from './services/elasticsearch.service.js';
 
 const startServer = async () => {
   // Connect session Redis client before starting the server
@@ -11,9 +16,11 @@ const startServer = async () => {
   // Run startup reconciliation for future scheduled emails
   await reconcileScheduledEmails();
 
-  // Initialize Elasticsearch index and run safe backfill for existing sent emails
+  // Initialize Elasticsearch indices and run safe backfills for existing sent and scheduled emails
   await ensureSentEmailsIndex();
   await backfillSentEmailsToIndex();
+  await ensureScheduledEmailsIndex();
+  await backfillScheduledEmailsToIndex();
 
   const app = createApp();
 

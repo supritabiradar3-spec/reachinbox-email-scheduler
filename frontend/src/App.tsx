@@ -42,6 +42,7 @@ interface ScheduledEmailItem {
   subject: string;
   scheduledAt: string;
   status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RATE_LIMITED' | string;
+  snippet?: string | null;
 }
 
 interface SentEmailItem {
@@ -178,6 +179,7 @@ export default function App(): React.JSX.Element {
 
   // Scheduled Emails State
   const [scheduledEmails, setScheduledEmails] = useState<ScheduledEmailItem[]>([]);
+  const [globalScheduledTotal, setGlobalScheduledTotal] = useState<number>(0);
   const [scheduledPagination, setScheduledPagination] = useState<PaginationMeta>({
     total: 0,
     page: 1,
@@ -186,6 +188,8 @@ export default function App(): React.JSX.Element {
   });
   const [scheduledLoading, setScheduledLoading] = useState<boolean>(false);
   const [scheduledError, setScheduledError] = useState<string | null>(null);
+  const [scheduledSearchQuery, setScheduledSearchQuery] = useState<string>('');
+  const [activeScheduledSearch, setActiveScheduledSearch] = useState<string>('');
 
   // Sent Emails State
   const [sentEmails, setSentEmails] = useState<SentEmailItem[]>([]);
@@ -199,7 +203,7 @@ export default function App(): React.JSX.Element {
   const [sentLoading, setSentLoading] = useState<boolean>(false);
   const [sentError, setSentError] = useState<string | null>(null);
 
-  // Search State
+  // Search State (Sent Emails)
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeSearch, setActiveSearch] = useState<string>('');
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -355,7 +359,9 @@ export default function App(): React.JSX.Element {
       if (response.ok) {
         const data = await response.json();
         setScheduledEmails(data.emails || []);
-        setScheduledPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        const pagination = data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 };
+        setScheduledPagination(pagination);
+        setGlobalScheduledTotal(pagination.total);
         return true;
       } else if (response.status === 401) {
         setUser(null);
@@ -373,6 +379,55 @@ export default function App(): React.JSX.Element {
       setScheduledLoading(false);
     }
   }, []);
+
+  // Execute Scheduled Emails Search via Elasticsearch
+  const executeScheduledSearch = useCallback(async (query: string, page: number = 1): Promise<boolean> => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setActiveScheduledSearch('');
+      return fetchScheduledEmails(1);
+    }
+
+    setScheduledLoading(true);
+    setScheduledError(null);
+    setActiveScheduledSearch(trimmed);
+
+    try {
+      const response = await fetch(`/api/emails/scheduled/search?q=${encodeURIComponent(trimmed)}&page=${page}&limit=10`, {
+        credentials: 'include'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setScheduledEmails(data.emails || []);
+        setScheduledPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        return true;
+      } else if (response.status === 401) {
+        setUser(null);
+        return false;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        setScheduledError(errorData.message || 'Scheduled email search request failed');
+        return false;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error executing scheduled search';
+      setScheduledError(msg);
+      return false;
+    } finally {
+      setScheduledLoading(false);
+    }
+  }, [fetchScheduledEmails]);
+
+  const handleClearScheduledSearch = () => {
+    setScheduledSearchQuery('');
+    setActiveScheduledSearch('');
+    fetchScheduledEmails(1);
+  };
+
+  const handleScheduledSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    executeScheduledSearch(scheduledSearchQuery, 1);
+  };
 
   // Fetch Sent Emails
   const fetchSentEmails = useCallback(async (page: number = 1): Promise<boolean> => {
@@ -406,7 +461,7 @@ export default function App(): React.JSX.Element {
     }
   }, []);
 
-  // Execute Search via Elasticsearch
+  // Execute Search via Elasticsearch (Sent Emails)
   const executeSearch = useCallback(async (query: string, page: number = 1): Promise<boolean> => {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -458,7 +513,9 @@ export default function App(): React.JSX.Element {
   const handleRefreshAll = async () => {
     fetchSenders();
     fetchSlackStatus();
-    const schedOk = await fetchScheduledEmails(scheduledPagination.page || 1);
+    const schedOk = activeScheduledSearch
+      ? await executeScheduledSearch(activeScheduledSearch, scheduledPagination.page || 1)
+      : await fetchScheduledEmails(scheduledPagination.page || 1);
     const sentOk = activeSearch
       ? await executeSearch(activeSearch, sentPagination.page || 1)
       : await fetchSentEmails(sentPagination.page || 1);
@@ -517,7 +574,11 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     if (user) {
       if (activeTab === 'scheduled') {
-        fetchScheduledEmails(scheduledPagination.page || 1);
+        if (activeScheduledSearch) {
+          executeScheduledSearch(activeScheduledSearch, scheduledPagination.page || 1);
+        } else {
+          fetchScheduledEmails(scheduledPagination.page || 1);
+        }
       } else {
         if (activeSearch) {
           executeSearch(activeSearch, sentPagination.page || 1);
@@ -544,8 +605,13 @@ export default function App(): React.JSX.Element {
       if (response.ok) {
         setUser(null);
         setScheduledEmails([]);
+        setGlobalScheduledTotal(0);
         setSentEmails([]);
         setGlobalSentTotal(0);
+        setScheduledSearchQuery('');
+        setActiveScheduledSearch('');
+        setSearchQuery('');
+        setActiveSearch('');
         setLastUpdated(null);
       }
     } catch (err) {
@@ -557,6 +623,8 @@ export default function App(): React.JSX.Element {
 
   const handleCampaignCreated = () => {
     setActiveTab('scheduled');
+    setActiveScheduledSearch('');
+    setScheduledSearchQuery('');
     fetchScheduledEmails(1);
     fetchSentEmails(1);
     fetchSenders();
@@ -795,7 +863,7 @@ export default function App(): React.JSX.Element {
                 </div>
                 <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" aria-hidden="true"></span>
-                  <span>{scheduledPagination.total} Scheduled</span>
+                  <span>{globalScheduledTotal} Scheduled</span>
                 </div>
                 <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" aria-hidden="true"></span>
@@ -818,7 +886,7 @@ export default function App(): React.JSX.Element {
                     setActiveTab('scheduled');
                   }
                 }}
-                aria-label={`View scheduled emails. Currently ${scheduledPagination.total} scheduled.`}
+                aria-label={`View scheduled emails. Currently ${globalScheduledTotal} scheduled.`}
                 className="p-4 rounded-xl bg-slate-900/60 border border-indigo-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-indigo-500/40 cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none select-none"
               >
                 <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
@@ -829,11 +897,11 @@ export default function App(): React.JSX.Element {
                     <span className="sm:hidden">Scheduled</span>
                     <span className="hidden sm:inline">Scheduled Emails</span>
                   </p>
-                  {scheduledLoading && scheduledPagination.total === 0 ? (
+                  {scheduledLoading && globalScheduledTotal === 0 ? (
                     <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
                   ) : (
                     <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
-                      {scheduledPagination.total ?? '—'}
+                      {globalScheduledTotal ?? '—'}
                     </p>
                   )}
                   <p className="text-[10px] text-slate-400 mt-0.5 truncate hidden sm:block">Awaiting queue dispatch</p>
@@ -944,7 +1012,7 @@ export default function App(): React.JSX.Element {
                         ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
                         : 'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}>
-                      {scheduledPagination.total}
+                      {globalScheduledTotal}
                     </span>
                   </button>
 
@@ -999,6 +1067,71 @@ export default function App(): React.JSX.Element {
                 {/* SCHEDULED EMAILS TAB */}
                 {activeTab === 'scheduled' && (
                   <div className="space-y-4">
+                    {/* Full-Text Elasticsearch Scheduled Email Search Bar */}
+                    <form onSubmit={handleScheduledSearchSubmit} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <div className="relative flex-1">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <Search className="w-4 h-4" />
+                        </div>
+                        <input
+                          id="scheduled-email-search-input"
+                          type="text"
+                          value={scheduledSearchQuery}
+                          onChange={(e) => setScheduledSearchQuery(e.target.value)}
+                          placeholder="Search scheduled emails by subject, body, or recipient..."
+                          className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition"
+                        />
+                        {scheduledSearchQuery && (
+                          <button
+                            type="button"
+                            onClick={handleClearScheduledSearch}
+                            className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300"
+                            aria-label="Clear scheduled search input"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="submit"
+                          id="search-scheduled-btn"
+                          disabled={scheduledLoading || !scheduledSearchQuery.trim()}
+                          className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Search</span>
+                        </button>
+                        {activeScheduledSearch && (
+                          <button
+                            type="button"
+                            onClick={handleClearScheduledSearch}
+                            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </form>
+
+                    {/* Active Scheduled Search Filter Banner */}
+                    {activeScheduledSearch && (
+                      <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-indigo-950/40 border border-indigo-800/40 text-xs text-indigo-300">
+                        <div className="flex items-center space-x-2">
+                          <Search className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>
+                            Showing search results for: <strong className="text-white font-semibold">"{activeScheduledSearch}"</strong> ({scheduledPagination.total} {scheduledPagination.total === 1 ? 'match' : 'matches'})
+                          </span>
+                        </div>
+                        <button
+                          onClick={handleClearScheduledSearch}
+                          className="text-xs text-indigo-400 hover:text-indigo-200 underline"
+                        >
+                          Reset to all scheduled emails
+                        </button>
+                      </div>
+                    )}
+
                     {/* Error Banner with Working Retry */}
                     {scheduledError && (
                       <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/60 text-rose-300 text-xs flex items-center justify-between">
@@ -1007,7 +1140,13 @@ export default function App(): React.JSX.Element {
                           <span>{scheduledError}</span>
                         </div>
                         <button
-                          onClick={() => fetchScheduledEmails(scheduledPagination.page)}
+                          onClick={() => {
+                            if (activeScheduledSearch) {
+                              executeScheduledSearch(activeScheduledSearch, scheduledPagination.page);
+                            } else {
+                              fetchScheduledEmails(scheduledPagination.page);
+                            }
+                          }}
                           className="inline-flex items-center space-x-1 px-2.5 py-1 bg-rose-900/60 hover:bg-rose-800 text-rose-200 rounded-lg text-xs font-medium border border-rose-700/50 transition"
                         >
                           <RotateCcw className="w-3 h-3" />
@@ -1031,24 +1170,37 @@ export default function App(): React.JSX.Element {
                             <Clock className="w-5 h-5" />
                           </div>
                           <div className="space-y-1">
-                            <h3 className="text-sm sm:text-base font-semibold text-white">Your schedule is clear</h3>
+                            <h3 className="text-sm sm:text-base font-semibold text-white">
+                              {activeScheduledSearch ? 'No matching scheduled emails' : 'Your schedule is clear'}
+                            </h3>
                             <p className="text-xs text-slate-400">
-                              Create a campaign to schedule your next batch of emails.
+                              {activeScheduledSearch
+                                ? `No scheduled emails matched "${activeScheduledSearch}". Try refining your query or keywords.`
+                                : 'Create a campaign to schedule your next batch of emails.'}
                             </p>
                           </div>
                           <div className="pt-1.5">
-                            <button
-                              onClick={() => setIsComposeOpen(true)}
-                              className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                              <span>Compose New Email</span>
-                            </button>
+                            {activeScheduledSearch ? (
+                              <button
+                                onClick={handleClearScheduledSearch}
+                                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium border border-slate-700 transition"
+                              >
+                                Clear Search Filter
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setIsComposeOpen(true)}
+                                className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Compose New Email</span>
+                              </button>
+                            )}
                           </div>
                         </div>
 
-                        {/* Recent Delivery Activity (if sent records exist) */}
-                        {sentEmails.length > 0 && (
+                        {/* Recent Delivery Activity (if sent records exist and not in search mode) */}
+                        {!activeScheduledSearch && sentEmails.length > 0 && (
                           <div className="pt-6 border-t border-slate-800/80 text-left max-w-2xl mx-auto space-y-3">
                             <div className="flex items-center justify-between">
                               <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
@@ -1119,8 +1271,13 @@ export default function App(): React.JSX.Element {
                                       {getFriendlySenderName(item.senderKey)}
                                     </span>
                                   </td>
-                                  <td className="py-3 px-4 text-slate-300 max-w-xs truncate" title={item.subject}>
-                                    {item.subject}
+                                  <td className="py-3 px-4 text-slate-300 max-w-sm">
+                                    <p className="font-medium text-slate-200 truncate" title={item.subject}>{item.subject}</p>
+                                    {item.snippet && (
+                                      <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1 italic font-sans text-slate-400/90">
+                                        <HighlightSnippet snippet={item.snippet} />
+                                      </p>
+                                    )}
                                   </td>
                                   <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                                     {formatDateTime(item.scheduledAt)}
@@ -1144,9 +1301,16 @@ export default function App(): React.JSX.Element {
                                 </span>
                                 <StatusBadge status={item.status} />
                               </div>
-                              <p className="text-xs text-slate-300 font-medium line-clamp-2" title={item.subject}>
-                                {item.subject}
-                              </p>
+                              <div>
+                                <p className="text-xs text-slate-200 font-medium line-clamp-2" title={item.subject}>
+                                  {item.subject}
+                                </p>
+                                {item.snippet && (
+                                  <p className="text-[11px] text-slate-400 mt-1 line-clamp-2 italic">
+                                    <HighlightSnippet snippet={item.snippet} />
+                                  </p>
+                                )}
+                              </div>
                               <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
                                 <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-medium">
                                   {getFriendlySenderName(item.senderKey)}
@@ -1167,7 +1331,14 @@ export default function App(): React.JSX.Element {
                             </span>
                             <div className="flex items-center space-x-2">
                               <button
-                                onClick={() => fetchScheduledEmails(scheduledPagination.page - 1)}
+                                onClick={() => {
+                                  const prevPage = scheduledPagination.page - 1;
+                                  if (activeScheduledSearch) {
+                                    executeScheduledSearch(activeScheduledSearch, prevPage);
+                                  } else {
+                                    fetchScheduledEmails(prevPage);
+                                  }
+                                }}
                                 disabled={scheduledPagination.page <= 1 || scheduledLoading}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition"
                                 aria-label="Previous page"
@@ -1178,7 +1349,14 @@ export default function App(): React.JSX.Element {
                                 Page {scheduledPagination.page} of {scheduledPagination.totalPages}
                               </span>
                               <button
-                                onClick={() => fetchScheduledEmails(scheduledPagination.page + 1)}
+                                onClick={() => {
+                                  const nextPage = scheduledPagination.page + 1;
+                                  if (activeScheduledSearch) {
+                                    executeScheduledSearch(activeScheduledSearch, nextPage);
+                                  } else {
+                                    fetchScheduledEmails(nextPage);
+                                  }
+                                }}
                                 disabled={scheduledPagination.page >= scheduledPagination.totalPages || scheduledLoading}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition"
                                 aria-label="Next page"

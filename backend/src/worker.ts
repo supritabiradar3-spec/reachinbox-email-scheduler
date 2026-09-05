@@ -4,7 +4,13 @@ import { prisma } from './config/prisma.js';
 import { getConfiguredSenders } from './config/senders.config.js';
 import { EMAIL_QUEUE_NAME } from './queues/email.queue.js';
 import { sendEmail, verifyAllTransporters, sanitizeError } from './services/email.service.js';
-import { indexSentEmail, ensureSentEmailsIndex } from './services/elasticsearch.service.js';
+import {
+  indexSentEmail,
+  ensureSentEmailsIndex,
+  indexScheduledEmail,
+  ensureScheduledEmailsIndex,
+  deleteScheduledEmailDoc
+} from './services/elasticsearch.service.js';
 import { reserveDispatchSlot } from './services/rateLimiter.service.js';
 import { checkAndSendCampaignSlackNotification, checkAndSendRateLimitSlackNotification } from './services/slack.service.js';
 
@@ -129,6 +135,13 @@ export const processEmailJob = async (
         }
       });
 
+      // Update Elasticsearch scheduled index (non-blocking)
+      try {
+        await indexScheduledEmail(emailId);
+      } catch (esErr: unknown) {
+        console.warn(`[Worker] Elasticsearch rate-limited indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
+      }
+
       console.log(
         `[Worker] Email ${emailId} sender [${senderKey}] rate-limited (reason: ${reservation.reason}). Wait: ${waitMs}ms, next eligible: ${nextEligibleTime.toISOString()}.`
       );
@@ -180,6 +193,13 @@ export const processEmailJob = async (
   if (lockResult.count === 0) {
     console.log(`[Worker] Email ${emailId} could not be locked for processing (likely already sent). Skipping.`);
     return;
+  }
+
+  // Update Elasticsearch scheduled index to PROCESSING (non-blocking)
+  try {
+    await indexScheduledEmail(emailId);
+  } catch (esErr: unknown) {
+    console.warn(`[Worker] Elasticsearch processing indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
   }
 
   try {
@@ -242,6 +262,17 @@ export const processEmailJob = async (
       }
     });
 
+    // Update Elasticsearch state: if FAILED, index to sent index & remove from scheduled index; if retrying, update scheduled index
+    try {
+      if (isExhausted) {
+        await indexSentEmail(emailId);
+      } else {
+        await indexScheduledEmail(emailId);
+      }
+    } catch (esErr: unknown) {
+      console.warn(`[Worker] Elasticsearch failure state indexing deferred/failed for email ${emailId}: ${sanitizeError(esErr)}`);
+    }
+
     console.error(
       `[Worker] Error sending email ${emailId} (attempt ${currentAttempt}/${maxAttempts}) via [${emailRecord.senderKey}]: ${sanitizedErrMsg}`
     );
@@ -283,6 +314,7 @@ export const emailWorker = new Worker<EmailJobData>(
 emailWorker.on('ready', async () => {
   console.log('[Worker] Worker connected to Redis and ready to process jobs.');
   await verifyAllTransporters();
+  await ensureScheduledEmailsIndex();
   await ensureSentEmailsIndex();
 });
 

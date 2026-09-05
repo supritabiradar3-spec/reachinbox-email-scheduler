@@ -2,7 +2,10 @@ import {
   elasticsearchClient, 
   SENT_EMAILS_INDEX, 
   SENT_EMAILS_MAPPING_PROPERTIES, 
-  SentEmailDocument 
+  SentEmailDocument,
+  SCHEDULED_EMAILS_INDEX,
+  SCHEDULED_EMAILS_MAPPING_PROPERTIES,
+  ScheduledEmailDocument
 } from '../config/elasticsearch.js';
 import { prisma } from '../config/prisma.js';
 import { sanitizeError } from './email.service.js';
@@ -52,6 +55,43 @@ export const buildSentEmailDocument = (email: {
 };
 
 /**
+ * Builds a clean, sanitized Elasticsearch document for scheduled emails.
+ */
+export const buildScheduledEmailDocument = (email: {
+  id: string;
+  campaignId: string;
+  senderKey: string;
+  recipientEmail: string;
+  subject: string;
+  body: string;
+  status: string;
+  scheduledAt: Date;
+  createdAt: Date;
+  campaign?: {
+    userId: string;
+  } | null;
+  userId?: string;
+}): ScheduledEmailDocument => {
+  const userId = email.userId || email.campaign?.userId;
+  if (!userId) {
+    throw new Error(`Cannot build scheduled email document for email ${email.id}: missing userId.`);
+  }
+
+  return {
+    id: email.id,
+    userId,
+    campaignId: email.campaignId,
+    recipientEmail: email.recipientEmail,
+    senderKey: email.senderKey,
+    subject: email.subject,
+    body: email.body,
+    status: email.status,
+    scheduledAt: email.scheduledAt.toISOString(),
+    createdAt: email.createdAt.toISOString()
+  };
+};
+
+/**
  * Ensures the 'reachinbox-sent-emails' index exists with explicit mappings.
  * Idempotent: Never deletes or recreates an existing index during startup.
  */
@@ -77,8 +117,56 @@ export const ensureSentEmailsIndex = async (): Promise<boolean> => {
 };
 
 /**
+ * Ensures the 'reachinbox-scheduled-emails' index exists with explicit mappings.
+ * Idempotent: Never deletes or recreates an existing index during startup.
+ */
+export const ensureScheduledEmailsIndex = async (): Promise<boolean> => {
+  try {
+    const exists = await elasticsearchClient.indices.exists({ index: SCHEDULED_EMAILS_INDEX });
+    if (!exists) {
+      await elasticsearchClient.indices.create({
+        index: SCHEDULED_EMAILS_INDEX,
+        mappings: {
+          properties: SCHEDULED_EMAILS_MAPPING_PROPERTIES
+        }
+      });
+      console.log(`[Elasticsearch] Created index '${SCHEDULED_EMAILS_INDEX}' with explicit mappings.`);
+    } else {
+      console.log(`[Elasticsearch] Index '${SCHEDULED_EMAILS_INDEX}' is active.`);
+    }
+    return true;
+  } catch (err: unknown) {
+    console.warn(`[Elasticsearch] Warning: Could not initialize index '${SCHEDULED_EMAILS_INDEX}': ${sanitizeError(err)}`);
+    return false;
+  }
+};
+
+/**
+ * Safely removes a document from the scheduled emails index.
+ * Deleting a missing document is treated as a safe no-op.
+ */
+export const deleteScheduledEmailDoc = async (emailId: string): Promise<boolean> => {
+  try {
+    await elasticsearchClient.delete({
+      index: SCHEDULED_EMAILS_INDEX,
+      id: emailId,
+      refresh: true
+    });
+    console.log(`[Elasticsearch] Removed scheduled email document ${emailId} from '${SCHEDULED_EMAILS_INDEX}'.`);
+    return true;
+  } catch (err: unknown) {
+    const isNotFound = (err as { meta?: { statusCode?: number } })?.meta?.statusCode === 404;
+    if (!isNotFound) {
+      console.warn(`[Elasticsearch] Warning removing scheduled email ${emailId}: ${sanitizeError(err)}`);
+    }
+    return false;
+  }
+};
+
+/**
  * Indexes a single sent email into Elasticsearch.
  * Uses the ScheduledEmail.id as document _id for deterministic upserts.
+ * Safely removes any stale document from the scheduled index.
  * Non-blocking / safe: Failures are logged and never revert database SENT status.
  */
 export const indexSentEmail = async (emailId: string): Promise<boolean> => {
@@ -112,10 +200,104 @@ export const indexSentEmail = async (emailId: string): Promise<boolean> => {
     });
 
     console.log(`[Elasticsearch] Successfully indexed sent email ${emailId} into '${SENT_EMAILS_INDEX}'.`);
+
+    // Safely clean up from scheduled emails index
+    await deleteScheduledEmailDoc(emailId);
+
     return true;
   } catch (err: unknown) {
     console.error(`[Elasticsearch] Failed to index sent email ${emailId}: ${sanitizeError(err)}`);
     return false;
+  }
+};
+
+/**
+ * Indexes a single scheduled email into Elasticsearch.
+ * Uses ScheduledEmail.id as document _id for deterministic upserts.
+ * Non-blocking / safe: Failures are logged and never revert database status.
+ */
+export const indexScheduledEmail = async (emailId: string): Promise<boolean> => {
+  try {
+    const emailRecord = await prisma.scheduledEmail.findUnique({
+      where: { id: emailId },
+      include: {
+        campaign: {
+          select: { userId: true }
+        }
+      }
+    });
+
+    if (!emailRecord) {
+      console.warn(`[Elasticsearch] Cannot index scheduled email ${emailId}: record not found in database.`);
+      return false;
+    }
+
+    // Authoritative state check: if email is already in terminal state (SENT or FAILED),
+    // it MUST NOT be indexed into reachinbox-scheduled-emails. Ensure deletion from scheduled index.
+    if (emailRecord.status === 'SENT' || emailRecord.status === 'FAILED') {
+      console.log(`[Elasticsearch] Skipping scheduled indexing for email ${emailId} because status is terminal (${emailRecord.status}).`);
+      await deleteScheduledEmailDoc(emailId);
+      return false;
+    }
+
+    if (!emailRecord.campaign?.userId) {
+      console.warn(`[Elasticsearch] Cannot index scheduled email ${emailId}: missing campaign userId.`);
+      return false;
+    }
+
+    const document = buildScheduledEmailDocument(emailRecord);
+
+    await elasticsearchClient.index({
+      index: SCHEDULED_EMAILS_INDEX,
+      id: document.id,
+      document,
+      refresh: true
+    });
+
+    console.log(`[Elasticsearch] Successfully indexed scheduled email ${emailId} into '${SCHEDULED_EMAILS_INDEX}'.`);
+    return true;
+  } catch (err: unknown) {
+    console.error(`[Elasticsearch] Failed to index scheduled email ${emailId}: ${sanitizeError(err)}`);
+    return false;
+  }
+};
+
+/**
+ * Bulk indexes newly scheduled emails after campaign creation.
+ * Non-blocking: Failures are caught and logged without affecting database records.
+ */
+export const indexScheduledEmailsBulk = async (emailIds: string[]): Promise<number> => {
+  if (!emailIds || emailIds.length === 0) return 0;
+  try {
+    const emails = await prisma.scheduledEmail.findMany({
+      where: { id: { in: emailIds } },
+      include: {
+        campaign: {
+          select: { userId: true }
+        }
+      }
+    });
+
+    let count = 0;
+    for (const email of emails) {
+      if (!email.campaign?.userId) continue;
+      const document = buildScheduledEmailDocument(email);
+      await elasticsearchClient.index({
+        index: SCHEDULED_EMAILS_INDEX,
+        id: document.id,
+        document
+      });
+      count++;
+    }
+
+    if (count > 0) {
+      await elasticsearchClient.indices.refresh({ index: SCHEDULED_EMAILS_INDEX });
+    }
+    console.log(`[Elasticsearch] Bulk indexed ${count} scheduled emails into '${SCHEDULED_EMAILS_INDEX}'.`);
+    return count;
+  } catch (err: unknown) {
+    console.warn(`[Elasticsearch] Warning: Bulk indexing scheduled emails failed: ${sanitizeError(err)}`);
+    return 0;
   }
 };
 
@@ -126,7 +308,7 @@ export const indexSentEmail = async (emailId: string): Promise<boolean> => {
 export const backfillSentEmailsToIndex = async (): Promise<number> => {
   try {
     const sentEmails = await prisma.scheduledEmail.findMany({
-      where: { status: 'SENT' },
+      where: { status: { in: ['SENT', 'FAILED'] } },
       include: {
         campaign: {
           select: { userId: true }
@@ -159,6 +341,48 @@ export const backfillSentEmailsToIndex = async (): Promise<number> => {
   }
 };
 
+/**
+ * Reconciles / backfills active scheduled emails (SCHEDULED, RATE_LIMITED, PROCESSING) into Elasticsearch.
+ * Idempotently upserts documents using ScheduledEmail.id.
+ */
+export const backfillScheduledEmailsToIndex = async (): Promise<number> => {
+  try {
+    const scheduledEmails = await prisma.scheduledEmail.findMany({
+      where: {
+        status: { in: ['SCHEDULED', 'RATE_LIMITED', 'PROCESSING'] }
+      },
+      include: {
+        campaign: {
+          select: { userId: true }
+        }
+      }
+    });
+
+    let indexedCount = 0;
+    for (const email of scheduledEmails) {
+      if (!email.campaign?.userId) continue;
+
+      const document = buildScheduledEmailDocument(email);
+      await elasticsearchClient.index({
+        index: SCHEDULED_EMAILS_INDEX,
+        id: document.id,
+        document
+      });
+      indexedCount++;
+    }
+
+    if (indexedCount > 0) {
+      await elasticsearchClient.indices.refresh({ index: SCHEDULED_EMAILS_INDEX });
+    }
+
+    console.log(`[Elasticsearch] Backfilled ${indexedCount} scheduled emails into '${SCHEDULED_EMAILS_INDEX}'.`);
+    return indexedCount;
+  } catch (err: unknown) {
+    console.warn(`[Elasticsearch] Warning: Scheduled emails backfill encountered an issue: ${sanitizeError(err)}`);
+    return 0;
+  }
+};
+
 export interface SearchParams {
   userId: string;
   query: string;
@@ -180,6 +404,26 @@ export interface SearchResultItem {
 
 export interface SearchResultResponse {
   emails: SearchResultItem[];
+  pagination: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+export interface ScheduledSearchResultItem {
+  id: string;
+  recipientEmail: string;
+  senderKey: string;
+  subject: string;
+  scheduledAt: string;
+  status: string;
+  snippet?: string | null;
+}
+
+export interface ScheduledSearchResultResponse {
+  emails: ScheduledSearchResultItem[];
   pagination: {
     total: number;
     page: number;
@@ -270,6 +514,103 @@ export const searchUserSentEmails = async ({
       status: source.status,
       smtpMessageId: source.smtpMessageId,
       etherealPreviewUrl: source.etherealPreviewUrl,
+      snippet
+    };
+  });
+
+  return {
+    emails,
+    pagination: {
+      total: totalHits,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(totalHits / safeLimit)
+    }
+  };
+};
+
+/**
+ * Searches scheduled emails belonging exclusively to the authenticated user.
+ * Filters by active states (SCHEDULED, RATE_LIMITED, PROCESSING) and sorts by scheduledAt ascending.
+ */
+export const searchUserScheduledEmails = async ({
+  userId,
+  query,
+  page = 1,
+  limit = 20
+}: SearchParams): Promise<ScheduledSearchResultResponse> => {
+  const safePage = Math.max(1, page);
+  const safeLimit = Math.min(100, Math.max(1, limit));
+  const from = (safePage - 1) * safeLimit;
+
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return {
+      emails: [],
+      pagination: {
+        total: 0,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: 0
+      }
+    };
+  }
+
+  const response = await elasticsearchClient.search<ScheduledEmailDocument>({
+    index: SCHEDULED_EMAILS_INDEX,
+    from,
+    size: safeLimit,
+    query: {
+      bool: {
+        filter: [
+          { term: { userId } },
+          { terms: { status: ['SCHEDULED', 'RATE_LIMITED', 'PROCESSING'] } }
+        ],
+        must: [
+          {
+            multi_match: {
+              query: trimmedQuery,
+              fields: [
+                'subject^3',
+                'recipientEmail.text^2',
+                'recipientEmail^2',
+                'body',
+                'senderKey'
+              ],
+              fuzziness: 'AUTO'
+            }
+          }
+        ]
+      }
+    },
+    highlight: {
+      fields: {
+        subject: { number_of_fragments: 0 },
+        body: { fragment_size: 140, number_of_fragments: 1 }
+      }
+    },
+    sort: [
+      { scheduledAt: { order: 'asc', missing: '_last' } },
+      { createdAt: { order: 'asc' } }
+    ]
+  });
+
+  const totalHits = typeof response.hits.total === 'number'
+    ? response.hits.total
+    : (response.hits.total?.value || 0);
+
+  const emails: ScheduledSearchResultItem[] = response.hits.hits.map((hit) => {
+    const source = hit._source!;
+    const highlight = hit.highlight;
+    const snippet = highlight?.body?.[0] || (source.body ? source.body.slice(0, 140) + '...' : null);
+
+    return {
+      id: source.id,
+      recipientEmail: source.recipientEmail,
+      senderKey: source.senderKey,
+      subject: source.subject,
+      scheduledAt: source.scheduledAt,
+      status: source.status,
       snippet
     };
   });

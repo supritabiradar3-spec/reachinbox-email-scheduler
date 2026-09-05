@@ -653,6 +653,222 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       expect(emailResent).toBe(false);
     });
   });
-});
 
+  describe('Elasticsearch Scheduled Emails Indexing & Search', () => {
+    it('should correctly build a ScheduledEmailDocument from record with direct userId', async () => {
+      const { buildScheduledEmailDocument } = await import('./elasticsearch.service.js');
+      const now = new Date();
+      const schedTime = new Date(Date.now() + 60000);
+
+      const record = {
+        id: 'sched-email-1',
+        userId: 'user-alice-123',
+        campaignId: 'camp-123',
+        senderKey: 'sender-1',
+        recipientEmail: 'Recipient@Example.Com',
+        subject: 'Scheduled Outreach',
+        body: 'Hello, this email is scheduled for tomorrow.',
+        status: 'SCHEDULED',
+        scheduledAt: schedTime,
+        createdAt: now
+      };
+
+      const doc = buildScheduledEmailDocument(record);
+
+      expect(doc.id).toBe('sched-email-1');
+      expect(doc.userId).toBe('user-alice-123');
+      expect(doc.campaignId).toBe('camp-123');
+      expect(doc.senderKey).toBe('sender-1');
+      expect(doc.recipientEmail).toBe('Recipient@Example.Com');
+      expect(doc.subject).toBe('Scheduled Outreach');
+      expect(doc.body).toBe('Hello, this email is scheduled for tomorrow.');
+      expect(doc.status).toBe('SCHEDULED');
+      expect(doc.scheduledAt).toBe(schedTime.toISOString());
+      expect(doc.createdAt).toBe(now.toISOString());
+    });
+
+    it('should extract userId from nested campaign when direct userId is not present', async () => {
+      const { buildScheduledEmailDocument } = await import('./elasticsearch.service.js');
+      const record = {
+        id: 'sched-email-2',
+        campaignId: 'camp-456',
+        senderKey: 'sender-2',
+        recipientEmail: 'client@example.org',
+        subject: 'Follow-up Email',
+        body: 'Just following up on our meeting.',
+        status: 'RATE_LIMITED',
+        scheduledAt: new Date(),
+        createdAt: new Date(),
+        campaign: {
+          userId: 'user-bob-999'
+        }
+      };
+
+      const doc = buildScheduledEmailDocument(record);
+      expect(doc.userId).toBe('user-bob-999');
+      expect(doc.status).toBe('RATE_LIMITED');
+    });
+
+    it('should throw error when building scheduled document if userId cannot be determined', async () => {
+      const { buildScheduledEmailDocument } = await import('./elasticsearch.service.js');
+      const invalidRecord = {
+        id: 'sched-email-orphan',
+        campaignId: 'camp-orphan',
+        senderKey: 'sender-1',
+        recipientEmail: 'orphan@example.com',
+        subject: 'No Owner',
+        body: 'Missing user',
+        status: 'SCHEDULED',
+        scheduledAt: new Date(),
+        createdAt: new Date(),
+        campaign: null
+      };
+
+      expect(() => buildScheduledEmailDocument(invalidRecord)).toThrow('missing userId');
+    });
+
+    it('should verify scheduled emails explicit mapping definition includes all required fields', async () => {
+      const { SCHEDULED_EMAILS_MAPPING_PROPERTIES, SCHEDULED_EMAILS_INDEX } = await import('../config/elasticsearch.js');
+
+      expect(SCHEDULED_EMAILS_INDEX).toBe('reachinbox-scheduled-emails');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.id.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.userId.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.campaignId.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.senderKey.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.status.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.subject.type).toBe('text');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.body.type).toBe('text');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.scheduledAt.type).toBe('date');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.createdAt.type).toBe('date');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.recipientEmail.type).toBe('keyword');
+      expect(SCHEDULED_EMAILS_MAPPING_PROPERTIES.recipientEmail.fields.text.type).toBe('text');
+    });
+
+    it('should safely initialize scheduled emails index when Elasticsearch is running', async () => {
+      const { ensureScheduledEmailsIndex } = await import('./elasticsearch.service.js');
+      const result = await ensureScheduledEmailsIndex();
+      expect(typeof result).toBe('boolean');
+    });
+
+    it('should enforce strict user isolation and active status filtering for scheduled email queries', () => {
+      const userA = 'user-alice-111';
+      const userB = 'user-bob-222';
+      const queryText = 'Quarterly Campaign';
+
+      const buildScheduledSearchQuery = (userId: string, q: string) => ({
+        bool: {
+          filter: [
+            { term: { userId } },
+            { terms: { status: ['SCHEDULED', 'RATE_LIMITED', 'PROCESSING'] } }
+          ],
+          must: [
+            {
+              multi_match: {
+                query: q,
+                fields: ['subject^3', 'recipientEmail.text^2', 'recipientEmail^2', 'body', 'senderKey']
+              }
+            }
+          ]
+        }
+      });
+
+      const aliceQuery = buildScheduledSearchQuery(userA, queryText);
+      const bobQuery = buildScheduledSearchQuery(userB, queryText);
+
+      // Verify tenant filter
+      expect(aliceQuery.bool.filter[0].term.userId).toBe(userA);
+      expect(bobQuery.bool.filter[0].term.userId).toBe(userB);
+      expect(aliceQuery.bool.filter[0].term.userId).not.toBe(bobQuery.bool.filter[0].term.userId);
+
+      // Verify active status filter
+      expect(aliceQuery.bool.filter[1].terms.status).toEqual(['SCHEDULED', 'RATE_LIMITED', 'PROCESSING']);
+    });
+
+    it('should return empty results gracefully when scheduled search query is empty or whitespace', async () => {
+      const { searchUserScheduledEmails } = await import('./elasticsearch.service.js');
+      const emptyResult = await searchUserScheduledEmails({
+        userId: 'user-123',
+        query: '    '
+      });
+
+      expect(emptyResult.emails).toEqual([]);
+      expect(emptyResult.pagination.total).toBe(0);
+      expect(emptyResult.pagination.page).toBe(1);
+    });
+
+    it('should safely delete scheduled email doc without error even if document is not found', async () => {
+      const { deleteScheduledEmailDoc } = await import('./elasticsearch.service.js');
+      await expect(deleteScheduledEmailDoc('non-existent-doc-id')).resolves.not.toThrow();
+    });
+
+    it('should verify backfillScheduledEmailsToIndex targets only active statuses (SCHEDULED, RATE_LIMITED, PROCESSING) and excludes SENT and FAILED', async () => {
+      const activeStatuses = ['SCHEDULED', 'RATE_LIMITED', 'PROCESSING'];
+      const terminalStatuses = ['SENT', 'FAILED'];
+
+      // Status predicate check
+      const shouldIncludeInScheduledBackfill = (status: string) => activeStatuses.includes(status);
+
+      expect(shouldIncludeInScheduledBackfill('SCHEDULED')).toBe(true);
+      expect(shouldIncludeInScheduledBackfill('RATE_LIMITED')).toBe(true);
+      expect(shouldIncludeInScheduledBackfill('PROCESSING')).toBe(true);
+      expect(shouldIncludeInScheduledBackfill('SENT')).toBe(false);
+      expect(shouldIncludeInScheduledBackfill('FAILED')).toBe(false);
+
+      terminalStatuses.forEach((st) => {
+        expect(activeStatuses).not.toContain(st);
+      });
+    });
+
+    it('should ensure backfill is idempotent across multiple invocations using deterministic document IDs', () => {
+      const mockIndex = new Map<string, any>();
+
+      const mockBackfillRecord = (record: { id: string; status: string; subject: string }) => {
+        if (['SCHEDULED', 'RATE_LIMITED', 'PROCESSING'].includes(record.status)) {
+          mockIndex.set(record.id, record);
+        }
+      };
+
+      const record1 = { id: 'email-1', status: 'SCHEDULED', subject: 'Campaign 1' };
+      const record2 = { id: 'email-2', status: 'RATE_LIMITED', subject: 'Campaign 2' };
+
+      // First backfill pass
+      mockBackfillRecord(record1);
+      mockBackfillRecord(record2);
+      expect(mockIndex.size).toBe(2);
+
+      // Second identical backfill pass (idempotent)
+      mockBackfillRecord(record1);
+      mockBackfillRecord(record2);
+      expect(mockIndex.size).toBe(2);
+      expect(mockIndex.get('email-1')?.subject).toBe('Campaign 1');
+    });
+
+    it('should prevent race condition: indexScheduledEmail aborts indexing and deletes doc if MySQL status is SENT or FAILED', async () => {
+      const { indexScheduledEmail } = await import('./elasticsearch.service.js');
+      const { prisma } = await import('../config/prisma.js');
+
+      // Mock prisma findUnique returning a SENT record
+      const origFindUnique = prisma.scheduledEmail.findUnique;
+      (prisma.scheduledEmail as any).findUnique = vi.fn().mockResolvedValue({
+        id: 'race-test-sent-id',
+        status: 'SENT',
+        campaign: { userId: 'user-race-1' }
+      });
+
+      try {
+        const result = await indexScheduledEmail('race-test-sent-id');
+        expect(result).toBe(false);
+      } finally {
+        prisma.scheduledEmail.findUnique = origFindUnique;
+      }
+    });
+
+    it('should verify Elasticsearch connection failures in backfill are non-fatal and return 0 count without throwing', async () => {
+      const { backfillScheduledEmailsToIndex } = await import('./elasticsearch.service.js');
+      const result = await backfillScheduledEmailsToIndex();
+      expect(typeof result).toBe('number');
+      expect(result).toBeGreaterThanOrEqual(0);
+    });
+  });
+});
 

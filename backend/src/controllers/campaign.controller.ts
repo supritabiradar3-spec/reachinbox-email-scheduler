@@ -8,6 +8,7 @@ import {
 } from '../validators/campaign.validator.js';
 import { decryptSlackToken } from '../services/slackCrypto.service.js';
 import { verifySlackChannel } from '../services/slack.service.js';
+import { indexScheduledEmailsBulk } from '../services/elasticsearch.service.js';
 
 /**
  * Handles creation and scheduling of email campaigns.
@@ -195,6 +196,14 @@ export const createCampaign = async (req: Request, res: Response): Promise<void>
         const queueErrMsg = queueErr instanceof Error ? queueErr.message : 'Queue error';
         console.warn(`[Queue] Failed to enqueue initial job for email ${email.id}:`, queueErrMsg);
       }
+    }
+
+    // Asynchronously index newly created scheduled emails into Elasticsearch (non-blocking)
+    try {
+      const emailIds = createdEmails.map((email) => email.id);
+      await indexScheduledEmailsBulk(emailIds);
+    } catch (esErr: unknown) {
+      console.warn('[Campaign] Elasticsearch scheduled indexing deferred/failed:', esErr);
     }
 
     res.status(201).json({

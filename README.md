@@ -82,12 +82,12 @@ flowchart TD
 - **BullMQ Queue Management**: Background job queuing storing only minimal `{ emailId }` payloads in Redis, with exponential backoff retries and concurrency control.
 - **Distributed Rate Limiting & Live Slack Alerts**: Redis-backed sliding 1-hour window per tenant + sender with atomic Lua reservation, non-destructive BullMQ deferral, and live Slack Block Kit alerts on quota exhaustion.
 - **MySQL Persistence via Prisma ORM**: Relational database modeling for users, campaigns, scheduled emails, and encrypted Slack installations with foreign keys and indexes.
-- **Elasticsearch Full-Text Search**: Real-time indexing of sent email subjects and bodies with multi-match search queries and user ID scoping.
+- **Elasticsearch Full-Text Search**: Real-time indexing of both scheduled and sent emails across dedicated indices (`reachinbox-scheduled-emails` and `reachinbox-sent-emails`) with multi-match search queries, user ID scoping, and safe snippet highlighting.
 - **Safe Snippet Highlighting**: Search match highlighting without `dangerouslySetInnerHTML` by parsing Elasticsearch `<em>` tokens into safe React elements.
 - **Protected Bull Board Queue Monitor**: Interactive queue monitor mounted at `/admin/queues` guarded by Express session authentication.
 - **Real Slack OAuth 2.0 Integration**: Single-use cryptographic CSRF state tokens and AES-256-GCM encryption for Slack bot access tokens at rest.
 - **Idempotent Delivery Reports & Deduped Alerts**: Atomic MySQL status claims (`PENDING -> PROCESSING -> SENT`) for campaign summaries and Redis `SET NX` rate-limit alert deduplication with bounded TTL.
-- **Responsive Dark-Theme Dashboard**: Glassmorphic UI with real-time scheduled and sent metrics, in-place campaign scheduler modal, and search filters.
+- **Responsive Dark-Theme Dashboard**: Glassmorphic UI with isolated global metric counters, independent full-text search across Scheduled and Sent tabs, in-place campaign scheduler modal, and search filters.
 
 ---
 
@@ -168,6 +168,44 @@ sequenceDiagram
 
 ---
 
+## Elasticsearch Full-Text Search Architecture & Lifecycle
+
+The system provides production-grade full-text search across **both scheduled and sent emails** using dedicated Elasticsearch indices, ensuring high-speed keyword retrieval, safe snippet highlighting, and absolute tenant isolation.
+
+### Dedicated Index Design & Mappings
+
+- **Scheduled Emails Index (`reachinbox-scheduled-emails`)**:
+  - Contains active scheduled emails awaiting or undergoing dispatch.
+  - Fields: `id` (keyword), `userId` (keyword), `campaignId` (keyword), `senderKey` (keyword), `recipientEmail` (keyword + text subfield), `subject` (text), `body` (text), `status` (keyword), `scheduledAt` (date), `createdAt` (date).
+- **Sent Emails Index (`reachinbox-sent-emails`)**:
+  - Contains historical dispatched emails.
+  - Fields: `id` (keyword), `userId` (keyword), `campaignId` (keyword), `senderKey` (keyword), `recipientEmail` (keyword + text subfield), `subject` (text), `body` (text), `status` (keyword), `scheduledAt` (date), `sentAt` (date), `smtpMessageId` (keyword), `etherealPreviewUrl` (keyword).
+
+### Scheduled-Document Lifecycle & Invariants
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED: Campaign Created (Bulk Indexed)
+    SCHEDULED --> RATE_LIMITED: Hourly Limit Hit (ES Doc Updated)
+    RATE_LIMITED --> SCHEDULED: Rescheduled (ES Doc Updated)
+    SCHEDULED --> PROCESSING: Worker Claimed (ES Doc Updated)
+    PROCESSING --> SENT: SMTP Success (Indexed in Sent Index & Removed from Scheduled Index)
+    PROCESSING --> FAILED: Retries Exhausted (Indexed in Sent Index & Removed from Scheduled Index)
+```
+
+1. **Scheduled States**: Records in `SCHEDULED`, `RATE_LIMITED`, or `PROCESSING` states reside in `reachinbox-scheduled-emails`.
+2. **Terminal Transition & Index Migration**: When an email reaches `SENT` or `FAILED`, it is indexed into `reachinbox-sent-emails` and automatically removed from `reachinbox-scheduled-emails` via `deleteScheduledEmailDoc`.
+3. **Authoritative MySQL State**: MySQL remains the single source of truth. If a scheduled indexing operation encounters a terminal record, it skips indexing and ensures removal from the scheduled index to prevent state races.
+4. **API & Worker Startup Separation**:
+   - **API Startup**: Automatically runs idempotent index initialization (`ensureSentEmailsIndex`, `ensureScheduledEmailsIndex`) and safe reconciliation backfills (`backfillSentEmailsToIndex`, `backfillScheduledEmailsToIndex`).
+   - **Worker Startup**: Idempotently ensures indices exist without performing redundant full backfills across scaled worker replicas. Incremental synchronization occurs during job execution.
+5. **Non-Blocking Resilience**: Elasticsearch indexing operations are wrapped in safe try/catch handlers. Elasticsearch connection failures or timeouts are logged cleanly and never roll back successful MySQL transactions, crash the API, or drop background jobs.
+6. **Tenant & Count Isolation**:
+   - All search queries strictly filter by authenticated `userId = req.user.id`.
+   - Global dashboard counters (`globalScheduledTotal` and `globalSentTotal`) remain constant and isolated when users perform keyword searches within either tab.
+
+---
+
 ## Technology Stack
 
 | Category | Technologies |
@@ -198,7 +236,7 @@ Ensure the following tools are installed on your host machine:
 | **Backend API** | `5000` | Express REST API server (`http://localhost:5000`) |
 | **MySQL Database** | `3307` | Host forwarded port for Docker MySQL 8.0 container |
 | **Redis Server** | `6379` | Docker Redis 7.0 container for BullMQ and sessions |
-| **Elasticsearch** | `9200` | Docker Elasticsearch 8.15 container for sent email indexing |
+| **Elasticsearch** | `9200` | Docker Elasticsearch 8.15 container for sent and scheduled email indices |
 
 ---
 
@@ -424,6 +462,7 @@ All endpoints (except `/api/health` and `/api/auth/google*`) require an active s
 - `GET /api/senders` — Returns public sender choices (`key`, `displayName`, `fromEmail`).
 - `POST /api/campaigns` — Schedules a new email campaign.
 - `GET /api/emails/scheduled?page=1&limit=10` — Paginated scheduled emails.
+- `GET /api/emails/scheduled/search?q=keyword&page=1&limit=10` — Elasticsearch scheduled email search.
 - `GET /api/emails/sent?page=1&limit=10` — Paginated sent email history.
 - `GET /api/emails/search?q=keyword&page=1&limit=10` — Elasticsearch sent email search.
 
@@ -487,16 +526,16 @@ npm run build
 
 ### Verified Test Results
 ```text
-✓ backend (85 tests passed)
+✓ backend (97 tests passed)
   - slack.test.ts (35 tests)
-  - scheduler.test.ts (33 tests)
+  - scheduler.test.ts (45 tests)
   - rateLimiter.test.ts (17 tests)
 
 ✓ frontend (24 tests passed)
   - recipientParser.test.ts (18 tests)
   - highlightHelper.test.ts (6 tests)
 
-Total: 109/109 tests passed (100% pass rate)
+Total: 121/121 tests passed (100% pass rate)
 Typecheck: 0 errors
 Production Build: Successful
 ```
