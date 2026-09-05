@@ -189,6 +189,7 @@ export default function App(): React.JSX.Element {
 
   // Sent Emails State
   const [sentEmails, setSentEmails] = useState<SentEmailItem[]>([]);
+  const [globalSentTotal, setGlobalSentTotal] = useState<number>(0);
   const [sentPagination, setSentPagination] = useState<PaginationMeta>({
     total: 0,
     page: 1,
@@ -384,7 +385,9 @@ export default function App(): React.JSX.Element {
       if (response.ok) {
         const data = await response.json();
         setSentEmails(data.emails || []);
-        setSentPagination(data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 });
+        const pagination = data.pagination || { total: 0, page: 1, limit: 10, totalPages: 0 };
+        setSentPagination(pagination);
+        setGlobalSentTotal(pagination.total);
         return true;
       } else if (response.status === 401) {
         setUser(null);
@@ -542,6 +545,7 @@ export default function App(): React.JSX.Element {
         setUser(null);
         setScheduledEmails([]);
         setSentEmails([]);
+        setGlobalSentTotal(0);
         setLastUpdated(null);
       }
     } catch (err) {
@@ -795,7 +799,7 @@ export default function App(): React.JSX.Element {
                 </div>
                 <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-slate-950/60 border border-slate-800 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" aria-hidden="true"></span>
-                  <span>{sentPagination.total} Sent</span>
+                  <span>{globalSentTotal} Sent</span>
                 </div>
               </div>
             </div>
@@ -844,7 +848,7 @@ export default function App(): React.JSX.Element {
                     setActiveTab('sent');
                   }
                 }}
-                aria-label={`View sent emails. Currently ${sentPagination.total} delivered.`}
+                aria-label={`View sent emails. Currently ${globalSentTotal} delivered.`}
                 className="p-4 rounded-xl bg-slate-900/60 border border-emerald-500/20 shadow-sm flex items-start space-x-3.5 transition hover:border-emerald-500/40 cursor-pointer focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none select-none"
               >
                 <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
@@ -852,11 +856,11 @@ export default function App(): React.JSX.Element {
                 </div>
                 <div className="min-w-0">
                   <p className="text-xs font-medium text-slate-400 truncate">Sent Emails</p>
-                  {sentLoading && sentPagination.total === 0 ? (
+                  {sentLoading && globalSentTotal === 0 ? (
                     <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
                   ) : (
                     <p className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
-                      {sentPagination.total ?? '—'}
+                      {globalSentTotal ?? '—'}
                     </p>
                   )}
                   <p className="text-[10px] text-slate-400 mt-0.5 truncate">Successfully delivered</p>
@@ -945,7 +949,7 @@ export default function App(): React.JSX.Element {
                         ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
                         : 'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}>
-                      {sentPagination.total}
+                      {globalSentTotal}
                     </span>
                   </button>
                 </div>
