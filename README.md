@@ -478,7 +478,7 @@ reachinbox-email-scheduler/
 
 ---
 
-## Demo Checklist & Screenshots
+## Demo Checklist
 
 Ensure the following features are showcased during demonstration:
 
@@ -490,11 +490,63 @@ Ensure the following features are showcased during demonstration:
 6. [ ] **Sent Email Search**: Search sent emails with highlighted keywords.
 7. [ ] **Slack Delivery Report**: Verify Block Kit completion summary posted in Slack.
 
-### Screenshot Placeholders
-- Dashboard Overview: `docs/screenshots/dashboard_overview.png`
-- Campaign Composer: `docs/screenshots/compose_modal.png`
-- Bull Board Queue Visualizer: `docs/screenshots/bull_board.png`
-- Slack Completion Notification: `docs/screenshots/slack_notification.png`
+---
+
+## Application Screenshots
+
+### 1. Operations Dashboard
+The central dashboard displays real-time metrics for scheduled and delivered emails, active sender accounts, Slack workspace connectivity, and email campaign history.
+
+![ReachInbox Operations Dashboard](docs/screenshots/02-dashboard.png)
+
+---
+
+### 2. Google OAuth 2.0 Login
+Clean and secure login interface with Google OAuth 2.0 authentication and session state preservation.
+
+![ReachInbox Google OAuth 2.0 Login Screen](docs/screenshots/01-login.png)
+
+---
+
+### 3. Campaign Compose & Recipient Ingestion
+Modal interface for configuring multi-sender campaigns, composing subject and body content, and parsing CSV/TXT recipient lists with client-side validation.
+
+![Campaign Compose Modal Top Section](docs/screenshots/03-compose-modal-top.png)
+
+---
+
+### 4. Dispatch Timing & Slack Integration
+Campaign scheduling options including inter-email delay intervals, sliding-window hourly rate limits, and automated Slack completion notification channel selection.
+
+![Campaign Dispatch Timing and Slack Integration](docs/screenshots/04-compose-modal-slack.png)
+
+---
+
+### 5. Elasticsearch Highlighted Search
+Full-text search interface querying Elasticsearch for sent email subjects and bodies with safe client-side match snippet highlighting.
+
+![Elasticsearch Sent Email Search Results](docs/screenshots/05-search-results.png)
+
+---
+
+### 6. Bull Board Queue Monitoring
+Authenticated real-time queue visualizer displaying active, delayed, waiting, and completed BullMQ background dispatch jobs.
+
+![Bull Board Queue Monitoring Dashboard](docs/screenshots/06-queue-monitor.png)
+
+---
+
+### 7. Slack Completion Notification
+Automated Block Kit delivery summary posted to the designated Slack channel upon campaign completion with status breakdown.
+
+![Slack Automated Campaign Completion Notification](docs/screenshots/07-slack-notification.png)
+
+---
+
+### 8. Mobile Responsive Dashboard
+Optimized mobile interface (tested at 390px viewport) with responsive metric badges, compact tab navigation, and touch-friendly controls.
+
+![ReachInbox Mobile Responsive Dashboard](docs/screenshots/08-mobile-dashboard.png)
 
 ---
 
