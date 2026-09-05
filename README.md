@@ -681,6 +681,27 @@ Bull Board queue visualizer showing completed jobs and delayed jobs gracefully r
 
 ---
 
+### 11. Operations Control Center
+Live infrastructure telemetry showing healthy MySQL, Redis, Elasticsearch and BullMQ services, response times, and the email delivery architecture.
+
+![Operations Control Center](docs/screenshots/11-operations-control-center.png)
+
+---
+
+### 12. Updated Email Scheduler Dashboard
+Clean scheduled-email dashboard with service navigation, global metrics, scheduled Elasticsearch search and an empty state without duplicate actions.
+
+![Updated Email Scheduler Dashboard](docs/screenshots/12-updated-email-dashboard.png)
+
+---
+
+### 13. Sent Emails Dashboard
+Sent-email history with Elasticsearch search, sender details, delivery status, dispatch timestamps and Ethereal preview links.
+
+![Sent Emails Dashboard](docs/screenshots/13-sent-emails-dashboard.png)
+
+---
+
 ## Author
 
 **Suprita Biradar**
