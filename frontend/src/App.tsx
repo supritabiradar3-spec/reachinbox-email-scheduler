@@ -825,7 +825,10 @@ export default function App(): React.JSX.Element {
                   <CalendarClock className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-medium text-slate-400 truncate">Scheduled Emails</p>
+                  <p className="text-xs font-medium text-slate-400 truncate">
+                    <span className="sm:hidden">Scheduled</span>
+                    <span className="hidden sm:inline">Scheduled Emails</span>
+                  </p>
                   {scheduledLoading && scheduledPagination.total === 0 ? (
                     <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
                   ) : (
@@ -833,7 +836,7 @@ export default function App(): React.JSX.Element {
                       {scheduledPagination.total ?? '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Awaiting queue dispatch</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate hidden sm:block">Awaiting queue dispatch</p>
                 </div>
               </div>
 
@@ -855,7 +858,10 @@ export default function App(): React.JSX.Element {
                   <CheckCircle2 className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-medium text-slate-400 truncate">Sent Emails</p>
+                  <p className="text-xs font-medium text-slate-400 truncate">
+                    <span className="sm:hidden">Sent</span>
+                    <span className="hidden sm:inline">Sent Emails</span>
+                  </p>
                   {sentLoading && globalSentTotal === 0 ? (
                     <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
                   ) : (
@@ -863,7 +869,7 @@ export default function App(): React.JSX.Element {
                       {globalSentTotal ?? '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Successfully delivered</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate hidden sm:block">Successfully delivered</p>
                 </div>
               </div>
 
@@ -876,14 +882,17 @@ export default function App(): React.JSX.Element {
                   <AlertTriangle className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-medium text-slate-400 truncate">Failed Emails</p>
+                  <p className="text-xs font-medium text-slate-400 truncate">
+                    <span className="sm:hidden">Failed</span>
+                    <span className="hidden sm:inline">Failed Emails</span>
+                  </p>
                   <p
                     className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5"
                     title="No failed deliveries currently reported by the dashboard"
                   >
                     0
                   </p>
-                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Delivery errors</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate hidden sm:block">Delivery errors</p>
                 </div>
               </div>
 
@@ -893,7 +902,10 @@ export default function App(): React.JSX.Element {
                   <Users className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-medium text-slate-400 truncate">Active Senders</p>
+                  <p className="text-xs font-medium text-slate-400 truncate">
+                    <span className="sm:hidden">Senders</span>
+                    <span className="hidden sm:inline">Active Senders</span>
+                  </p>
                   {sendersLoading && senders.length === 0 ? (
                     <div className="h-6 w-12 bg-slate-800 animate-pulse rounded mt-1"></div>
                   ) : (
@@ -901,7 +913,7 @@ export default function App(): React.JSX.Element {
                       {senders.length > 0 ? senders.length : '—'}
                     </p>
                   )}
-                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">Configured accounts</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate hidden sm:block">Configured accounts</p>
                 </div>
               </div>
 
@@ -923,7 +935,10 @@ export default function App(): React.JSX.Element {
                     }`}
                   >
                     <Clock className="w-4 h-4" />
-                    <span>Scheduled Emails</span>
+                    <span>
+                      <span className="sm:hidden">Scheduled</span>
+                      <span className="hidden sm:inline">Scheduled Emails</span>
+                    </span>
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
                       activeTab === 'scheduled'
                         ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
@@ -943,7 +958,10 @@ export default function App(): React.JSX.Element {
                     }`}
                   >
                     <Send className="w-4 h-4" />
-                    <span>Sent Emails</span>
+                    <span>
+                      <span className="sm:hidden">Sent</span>
+                      <span className="hidden sm:inline">Sent Emails</span>
+                    </span>
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
                       activeTab === 'sent'
                         ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60'
