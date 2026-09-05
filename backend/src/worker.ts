@@ -6,7 +6,7 @@ import { EMAIL_QUEUE_NAME } from './queues/email.queue.js';
 import { sendEmail, verifyAllTransporters, sanitizeError } from './services/email.service.js';
 import { indexSentEmail, ensureSentEmailsIndex } from './services/elasticsearch.service.js';
 import { reserveDispatchSlot } from './services/rateLimiter.service.js';
-import { checkAndSendCampaignSlackNotification } from './services/slack.service.js';
+import { checkAndSendCampaignSlackNotification, checkAndSendRateLimitSlackNotification } from './services/slack.service.js';
 
 // Pre-flight check: Fail fast if no valid Ethereal SMTP senders are configured
 const configuredSenders = getConfiguredSenders();
@@ -38,8 +38,8 @@ const concurrency = getWorkerConcurrency();
  * Distributed Rate Limiting & Exactly-Once Delivery Architecture:
  * ---------------------------------------------------------------
  * 1. Redis Atomic Rate Reservation:
- *    - Rolling 60-minute window for campaign `hourlyLimit`.
- *    - Minimum dispatch interval for campaign `delaySeconds`.
+ *    - Rolling 60-minute window for tenant + sender `hourlyLimit`.
+ *    - Minimum dispatch interval for tenant + sender `delaySeconds`.
  *    - Evaluated atomically in Redis via Lua before acquiring processing lock.
  * 2. Non-Destructive Delay Lifecycle:
  *    - Rate-limited jobs are marked `RATE_LIMITED` and deferred with `job.moveToDelayed()`.
@@ -49,7 +49,8 @@ const concurrency = getWorkerConcurrency();
  *    - Atomic MySQL lock (`status: { not: 'SENT' }` -> `status: 'PROCESSING'`).
  * 4. Multi-sender SMTP & Resilient Elasticsearch Indexing:
  *    - Success on SMTP is authoritative even if ES indexing is deferred.
- * 5. Slack Idempotent Campaign Completion:
+ * 5. Slack Notifications:
+ *    - Real-time Slack alert on hourly limit hits with atomic Redis deduplication.
  *    - Atomically triggers Slack notification when all emails reach terminal state.
  * ==============================================================================
  */
@@ -79,8 +80,14 @@ export const processEmailJob = async (
       campaign: {
         select: {
           id: true,
+          userId: true,
+          senderKey: true,
+          subject: true,
           hourlyLimit: true,
-          delaySeconds: true
+          delaySeconds: true,
+          slackInstallationId: true,
+          slackChannelId: true,
+          slackChannelName: true
         }
       }
     }
@@ -99,7 +106,10 @@ export const processEmailJob = async (
 
   // 3. Distributed Redis Rate Limit Reservation (Rolling 60m hourly limit & delay interval)
   if (emailRecord.campaign) {
+    const senderKey = emailRecord.senderKey || emailRecord.campaign.senderKey;
     const reservation = await reserveDispatchSlot({
+      userId: emailRecord.campaign.userId,
+      senderKey,
       campaignId: emailRecord.campaign.id,
       hourlyLimit: emailRecord.campaign.hourlyLimit,
       delaySeconds: emailRecord.campaign.delaySeconds,
@@ -108,7 +118,7 @@ export const processEmailJob = async (
 
     if (!reservation.allowed) {
       const waitMs = Math.max(1000, reservation.waitMs);
-      const nextEligibleTime = new Date(Date.now() + waitMs);
+      const nextEligibleTime = reservation.nextAvailableAt || new Date(Date.now() + waitMs);
 
       // Update database status to RATE_LIMITED with deferred target time
       await prisma.scheduledEmail.update({
@@ -120,12 +130,36 @@ export const processEmailJob = async (
       });
 
       console.log(
-        `[Worker] Email ${emailId} (Campaign: ${emailRecord.campaign.id}) rate-limited (${reservation.reason}). Deferring by ${waitMs}ms to ${nextEligibleTime.toISOString()}`
+        `[Worker] Email ${emailId} sender [${senderKey}] rate-limited (reason: ${reservation.reason}). Wait: ${waitMs}ms, next eligible: ${nextEligibleTime.toISOString()}.`
       );
+
+      // Trigger Slack alert if and only if rate limit hit was due to HOURLY_LIMIT
+      if (reservation.reason === 'HOURLY_LIMIT') {
+        try {
+          const alertSent = await checkAndSendRateLimitSlackNotification({
+            userId: emailRecord.campaign.userId,
+            senderKey,
+            campaignId: emailRecord.campaign.id,
+            campaignSubject: emailRecord.campaign.subject,
+            hourlyLimit: emailRecord.campaign.hourlyLimit,
+            waitMs,
+            nextAvailableAt: nextEligibleTime,
+            channelId: emailRecord.campaign.slackChannelId
+          });
+          if (alertSent) {
+            console.log(`[Worker] Rate-limit Slack alert for sender [${senderKey}]: SENT`);
+          } else {
+            console.log(`[Worker] Rate-limit Slack alert for sender [${senderKey}]: SKIPPED`);
+          }
+        } catch (slackAlertErr: unknown) {
+          console.warn(`[Worker] Rate-limit Slack alert for sender [${senderKey}]: FAILED (${sanitizeError(slackAlertErr)})`);
+        }
+      }
 
       // Move BullMQ job to delayed state without marking as FAILED
       if (token) {
         await job.moveToDelayed(Date.now() + waitMs, token);
+        console.log(`[Worker] Email ${emailId} sender [${senderKey}] job deferred successfully.`);
         throw new DelayedError();
       }
       return;

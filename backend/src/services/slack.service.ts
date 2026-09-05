@@ -1,7 +1,10 @@
 import { config, isSlackConfigured } from '../config/env.js';
 import { prisma } from '../config/prisma.js';
+import { ioRedisClient } from '../config/redis.js';
+import { getConfiguredSenders } from '../config/senders.config.js';
 import { decryptSlackToken } from './slackCrypto.service.js';
 import { sanitizeError } from './email.service.js';
+import { getRateLimitAlertDedupKey } from './rateLimiter.service.js';
 
 export interface SlackOAuthTokenResponse {
   ok: boolean;
@@ -27,6 +30,17 @@ export interface CampaignNotificationStats {
   sentCount: number;
   failedCount: number;
   completedAt: Date;
+}
+
+export interface RateLimitSlackAlertParams {
+  userId: string;
+  senderKey: string;
+  campaignId?: string;
+  campaignSubject?: string;
+  hourlyLimit: number;
+  waitMs: number;
+  nextAvailableAt: Date;
+  channelId?: string | null;
 }
 
 /**
@@ -256,6 +270,74 @@ export const buildSlackCompletionMessage = (
 };
 
 /**
+ * Builds the sanitized Block Kit message payload for an hourly rate limit alert.
+ * Ensures zero recipient emails, zero message bodies, and zero SMTP credentials/tokens are exposed.
+ */
+export const buildSlackRateLimitMessage = (
+  channelId: string,
+  params: {
+    senderDisplayName: string;
+    senderKey: string;
+    hourlyLimit: number;
+    campaignSubject?: string;
+    nextAvailableAt: Date;
+  }
+) => {
+  const { senderDisplayName, senderKey, hourlyLimit, campaignSubject, nextAvailableAt } = params;
+
+  const fields: Array<{ type: 'mrkdwn'; text: string }> = [
+    {
+      type: 'mrkdwn',
+      text: `*Sender:*\n${senderDisplayName} (\`${senderKey}\`)`
+    },
+    {
+      type: 'mrkdwn',
+      text: `*Hourly Limit:*\n${hourlyLimit} emails / hr`
+    }
+  ];
+
+  if (campaignSubject) {
+    fields.push({
+      type: 'mrkdwn',
+      text: `*Campaign:*\n${campaignSubject}`
+    });
+  }
+
+  fields.push({
+    type: 'mrkdwn',
+    text: `*Next Eligible Dispatch:*\n<!date^${Math.floor(nextAvailableAt.getTime() / 1000)}^{date_num} {time_secs}|${nextAvailableAt.toUTCString()}>`
+  });
+
+  return {
+    channel: channelId,
+    text: `⚠️ Email hourly limit reached for sender "${senderDisplayName}" (${hourlyLimit} emails/hr). Dispatch temporarily deferred.`,
+    blocks: [
+      {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: '⚠️ Email Hourly Limit Reached',
+          emoji: true
+        }
+      },
+      {
+        type: 'section',
+        fields
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: 'ReachInbox Email Scheduler • Rate-limited jobs are deferred in queue and will dispatch automatically.'
+          }
+        ]
+      }
+    ]
+  };
+};
+
+/**
  * Evaluates campaign email status and idempotently claims and sends a completion notification
  * if and only if all scheduled emails in the campaign have reached a terminal status (SENT or FAILED).
  */
@@ -372,5 +454,91 @@ export const checkAndSendCampaignSlackNotification = async (campaignId: string):
     } catch {
       // Non-fatal catch
     }
+  }
+};
+
+/**
+ * Sends a real-time Slack notification when a sender reaches their configured hourly limit.
+ * Uses atomic Redis SET NX for deduplication across distributed workers, dynamically retrieves
+ * the tenant's Slack installation from the database, and safely no-ops if Slack is disconnected.
+ */
+export const checkAndSendRateLimitSlackNotification = async (
+  params: RateLimitSlackAlertParams
+): Promise<boolean> => {
+  const { userId, senderKey, campaignSubject, hourlyLimit, waitMs, nextAvailableAt, channelId } = params;
+
+  if (!userId || !senderKey) {
+    return false;
+  }
+
+  try {
+    // 1. Fetch active Slack installation dynamically from database
+    const slackInstallation = await prisma.slackInstallation.findFirst({
+      where: { userId }
+    });
+
+    if (!slackInstallation) {
+      // Disconnected or not connected: safe no-op
+      return false;
+    }
+
+    // 2. Determine target channel ID (from campaign or installation)
+    const targetChannelId = channelId || null;
+    if (!targetChannelId) {
+      // No destination channel configured: safe no-op
+      return false;
+    }
+
+    // 3. Deduplication via Redis SET NX
+    // Deduplication key scopes to tenant/user and sender key with a bounded window TTL
+    const dedupKey = getRateLimitAlertDedupKey(userId, senderKey);
+    const ttlSeconds = Math.min(3600, Math.max(60, Math.ceil(waitMs / 1000)));
+
+    const acquired = await ioRedisClient.set(dedupKey, '1', 'EX', ttlSeconds, 'NX');
+    if (acquired !== 'OK') {
+      // Duplicate alert in current window already handled by another worker
+      return false;
+    }
+
+    // 4. Resolve friendly sender name from configuration (never exposes private SMTP credentials)
+    const configuredSenders = getConfiguredSenders();
+    const sender = configuredSenders.find((s) => s.key === senderKey);
+    const senderDisplayName = sender?.displayName || senderKey;
+
+    // 5. Decrypt bot token in memory immediately before posting
+    const botToken = decryptSlackToken(slackInstallation.encryptedBotToken);
+
+    // 6. Build Block Kit payload
+    const payload = buildSlackRateLimitMessage(targetChannelId, {
+      senderDisplayName,
+      senderKey,
+      hourlyLimit,
+      campaignSubject,
+      nextAvailableAt
+    });
+
+    // 7. Post message to live Slack API
+    const response = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        'Content-Type': 'application/json; charset=utf-8'
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000)
+    });
+
+    const data = (await response.json()) as { ok: boolean; error?: string };
+    if (!data.ok) {
+      throw new Error(`Slack chat.postMessage failed: ${data.error || 'unknown_error'}`);
+    }
+
+    console.log(`[Slack] Rate limit alert sent for sender "${senderDisplayName}" to channel ${targetChannelId}`);
+    return true;
+  } catch (err: unknown) {
+    const sanitizedError = sanitizeError(err);
+    console.warn(`[Slack] Failed to send rate-limit Slack notification for user ${userId} / sender ${senderKey}: ${sanitizedError}`);
+    // Safe failure: never throw or block worker processing
+    return false;
   }
 };

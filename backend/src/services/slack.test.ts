@@ -732,4 +732,313 @@ describe('Phase 8: Real Slack OAuth 2.0 Integration & Completion Notifications',
       'Slack connection expired or revoked. Please disconnect and reconnect your workspace.'
     );
   });
+
+  // 29. First hourly-limit hit sends a formatted Block Kit alert with safe fields and no credentials/recipient emails
+  it('29. First hourly-limit hit sends a formatted Block Kit alert with safe fields and no credentials/recipient emails', async () => {
+    const { checkAndSendRateLimitSlackNotification, buildSlackRateLimitMessage } = await import('./slack.service.js');
+    const { ioRedisClient } = await import('../config/redis.js');
+    const { getRateLimitAlertDedupKey } = await import('./rateLimiter.service.js');
+
+    const testUserId = 'user-alert-test-1';
+    const testSenderKey = 'reachinbox-sales';
+    const dedupKey = getRateLimitAlertDedupKey(testUserId, testSenderKey);
+    await ioRedisClient.del(dedupKey);
+
+    const validEncryptedToken = encryptSlackToken('xoxb-valid-rate-limit-token');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue({
+      id: 'inst-rate-limit-1',
+      userId: testUserId,
+      teamId: 'T123',
+      teamName: 'ReachInbox Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    let sentPayload: any = null;
+    let authHeader: string | null = null;
+
+    global.fetch = vi.fn().mockImplementation(async (_url, options) => {
+      authHeader = options.headers?.Authorization || null;
+      sentPayload = JSON.parse(options.body as string);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, ts: '1234567890.123456' })
+      } as Response;
+    });
+
+    const nextAvailableAt = new Date(Date.now() + 1800000);
+    const sent = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      campaignId: 'camp-rate-limit-1',
+      campaignSubject: 'Q4 Enterprise Outreach',
+      hourlyLimit: 100,
+      waitMs: 1800000,
+      nextAvailableAt,
+      channelId: 'C_ALERTS'
+    });
+
+    expect(sent).toBe(true);
+    expect(authHeader).toBe('Bearer xoxb-valid-rate-limit-token');
+    expect(sentPayload.channel).toBe('C_ALERTS');
+    expect(sentPayload.text).toContain('hourly limit reached');
+    expect(sentPayload.text).toContain('ReachInbox Sales');
+
+    const payloadStr = JSON.stringify(sentPayload);
+    expect(payloadStr).toContain('Q4 Enterprise Outreach');
+    expect(payloadStr).toContain('100 emails / hr');
+    expect(payloadStr).not.toContain('recipient');
+    expect(payloadStr).not.toContain('@ethereal.email');
+    expect(payloadStr).not.toContain('pass123');
+    expect(payloadStr).not.toContain('xoxb-');
+
+    await ioRedisClient.del(dedupKey);
+  });
+
+  // 30. Deduplication via Redis SET NX prevents concurrent workers from sending duplicate rate-limit alerts
+  it('30. Deduplication via Redis SET NX prevents concurrent workers from sending duplicate rate-limit alerts', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    const { ioRedisClient } = await import('../config/redis.js');
+    const { getRateLimitAlertDedupKey } = await import('./rateLimiter.service.js');
+
+    const testUserId = 'user-alert-dedup-1';
+    const testSenderKey = 'reachinbox-sales';
+    const dedupKey = getRateLimitAlertDedupKey(testUserId, testSenderKey);
+    await ioRedisClient.del(dedupKey);
+
+    const validEncryptedToken = encryptSlackToken('xoxb-valid-rate-limit-token');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue({
+      id: 'inst-rate-limit-dedup',
+      userId: testUserId,
+      teamId: 'T123',
+      teamName: 'ReachInbox Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    let postCallCount = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      postCallCount++;
+      return {
+        ok: true,
+        json: async () => ({ ok: true, ts: '1234567890.123456' })
+      } as Response;
+    });
+
+    // Simulate 5 concurrent workers encountering the rate limit at the same time
+    const promises = Array.from({ length: 5 }, () =>
+      checkAndSendRateLimitSlackNotification({
+        userId: testUserId,
+        senderKey: testSenderKey,
+        campaignId: 'camp-concurrent-1',
+        campaignSubject: 'Concurrent Alert Test',
+        hourlyLimit: 50,
+        waitMs: 3600000,
+        nextAvailableAt: new Date(Date.now() + 3600000),
+        channelId: 'C_ALERTS'
+      })
+    );
+
+    const results = await Promise.all(promises);
+    const sentCount = results.filter((r) => r === true).length;
+    const skippedCount = results.filter((r) => r === false).length;
+
+    expect(sentCount).toBe(1);
+    expect(skippedCount).toBe(4);
+    expect(postCallCount).toBe(1);
+
+    await ioRedisClient.del(dedupKey);
+  });
+
+  // 31. Subsequent rate-limit window after TTL can send notification again
+  it('31. Subsequent rate-limit window after TTL can send notification again', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    const { ioRedisClient } = await import('../config/redis.js');
+    const { getRateLimitAlertDedupKey } = await import('./rateLimiter.service.js');
+
+    const testUserId = 'user-alert-window-1';
+    const testSenderKey = 'reachinbox-sales';
+    const dedupKey = getRateLimitAlertDedupKey(testUserId, testSenderKey);
+    await ioRedisClient.del(dedupKey);
+
+    const validEncryptedToken = encryptSlackToken('xoxb-valid-rate-limit-token');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue({
+      id: 'inst-rate-limit-window',
+      userId: testUserId,
+      teamId: 'T123',
+      teamName: 'ReachInbox Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, ts: '1234567890.123456' })
+    } as unknown as Response);
+
+    // 1. First alert in window 1 succeeds
+    const sent1 = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+    expect(sent1).toBe(true);
+
+    // 2. Immediate duplicate is suppressed
+    const sent2 = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+    expect(sent2).toBe(false);
+
+    // 3. Window clears (simulate TTL expiration by deleting key)
+    await ioRedisClient.del(dedupKey);
+
+    // 4. Next hourly window hit succeeds again
+    const sent3 = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+    expect(sent3).toBe(true);
+
+    await ioRedisClient.del(dedupKey);
+  });
+
+  // 32. Disconnected Slack workspace causes safe no-op returning false
+  it('32. Disconnected Slack workspace causes safe no-op returning false', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue(null);
+
+    const sent = await checkAndSendRateLimitSlackNotification({
+      userId: 'user-no-slack-workspace',
+      senderKey: 'reachinbox-sales',
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+
+    expect(sent).toBe(false);
+  });
+
+  // 33. Missing destination channel causes safe no-op returning false
+  it('33. Missing destination channel causes safe no-op returning false', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    const validEncryptedToken = encryptSlackToken('xoxb-valid-rate-limit-token');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue({
+      id: 'inst-rate-limit-window',
+      userId: 'user-no-channel',
+      teamId: 'T123',
+      teamName: 'ReachInbox Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    const sent = await checkAndSendRateLimitSlackNotification({
+      userId: 'user-no-channel',
+      senderKey: 'reachinbox-sales',
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: null // No destination channel
+    });
+
+    expect(sent).toBe(false);
+  });
+
+  // 34. Slack API / network failure does not throw or crash (returns false)
+  it('34. Slack API / network failure does not throw or crash (returns false)', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    const { ioRedisClient } = await import('../config/redis.js');
+    const { getRateLimitAlertDedupKey } = await import('./rateLimiter.service.js');
+
+    const testUserId = 'user-alert-fail-test';
+    const testSenderKey = 'reachinbox-sales';
+    const dedupKey = getRateLimitAlertDedupKey(testUserId, testSenderKey);
+    await ioRedisClient.del(dedupKey);
+
+    const validEncryptedToken = encryptSlackToken('xoxb-valid-rate-limit-token');
+    vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue({
+      id: 'inst-fail-test',
+      userId: testUserId,
+      teamId: 'T123',
+      teamName: 'ReachInbox Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    // Network timeout / connection failure simulation
+    global.fetch = vi.fn().mockRejectedValue(new Error('Network connection timeout to slack.com'));
+
+    const result = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+
+    expect(result).toBe(false); // Does not throw, safely returns false
+
+    await ioRedisClient.del(dedupKey);
+  });
+
+  // 35. Dynamic reconnection: After reconnecting Slack in database, subsequent limit hit successfully notifies
+  it('35. Dynamic reconnection: After reconnecting Slack in database, subsequent limit hit successfully notifies', async () => {
+    const { checkAndSendRateLimitSlackNotification } = await import('./slack.service.js');
+    const { ioRedisClient } = await import('../config/redis.js');
+    const { getRateLimitAlertDedupKey } = await import('./rateLimiter.service.js');
+
+    const testUserId = 'user-reconnect-test';
+    const testSenderKey = 'reachinbox-sales';
+    const dedupKey = getRateLimitAlertDedupKey(testUserId, testSenderKey);
+    await ioRedisClient.del(dedupKey);
+
+    // Initial state: Slack is disconnected
+    const findFirstSpy = vi.spyOn(prisma.slackInstallation, 'findFirst').mockResolvedValue(null);
+
+    const disconnectedResult = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+    expect(disconnectedResult).toBe(false);
+
+    // Reconnection occurs: SlackInstallation is saved in MySQL
+    const validEncryptedToken = encryptSlackToken('xoxb-reconnected-token');
+    findFirstSpy.mockResolvedValue({
+      id: 'inst-reconnected',
+      userId: testUserId,
+      teamId: 'T123',
+      teamName: 'Reconnected Workspace',
+      encryptedBotToken: validEncryptedToken
+    } as unknown as Awaited<ReturnType<typeof prisma.slackInstallation.findFirst>>);
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, ts: '1234567890.999999' })
+    } as unknown as Response);
+
+    const reconnectedResult = await checkAndSendRateLimitSlackNotification({
+      userId: testUserId,
+      senderKey: testSenderKey,
+      hourlyLimit: 50,
+      waitMs: 3600000,
+      nextAvailableAt: new Date(),
+      channelId: 'C_ALERTS'
+    });
+
+    expect(reconnectedResult).toBe(true);
+    await ioRedisClient.del(dedupKey);
+  });
 });

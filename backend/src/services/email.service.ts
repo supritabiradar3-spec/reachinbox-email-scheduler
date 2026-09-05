@@ -44,7 +44,7 @@ export const verifyAllTransporters = async (): Promise<void> => {
     try {
       const transporter = getTransporter(sender);
       await transporter.verify();
-      console.log(`[SMTP] Transporter for sender [${sender.key}] (${sender.fromEmail}) verified successfully.`);
+      console.log(`[SMTP] Transporter for sender [${sender.key}] verified successfully.`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Connection failed';
       console.warn(`[SMTP] Transporter verification failed for sender [${sender.key}]: ${sanitizeError(message)}`);

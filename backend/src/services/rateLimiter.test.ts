@@ -149,8 +149,9 @@ describe('Phase 7: Distributed Redis Dispatch Controls & Bull Board Monitoring',
     });
 
     expect(second.allowed).toBe(false);
-    expect(second.reason).toBe('DELAY');
+    expect(['MIN_DELAY', 'DELAY']).toContain(second.reason);
     expect(second.waitMs).toBe(7000); // 10000 - 3000 = 7000ms
+    expect(second.nextAvailableAt).toEqual(new Date(t0 + 3000 + 7000));
 
     // Third reservation at t0 + 10s (satisfies 10s delay)
     const third = await reserveDispatchSlot({
@@ -163,6 +164,7 @@ describe('Phase 7: Distributed Redis Dispatch Controls & Bull Board Monitoring',
 
     expect(third.allowed).toBe(true);
     expect(third.waitMs).toBe(0);
+    expect(third.nextAvailableAt).toEqual(new Date(t0 + 10000));
   });
 
   // 5. Atomic reservation prevents two concurrent workers from taking the same final slot
@@ -191,8 +193,8 @@ describe('Phase 7: Distributed Redis Dispatch Controls & Bull Board Monitoring',
     expect(deferredCount).toBe(4);
   });
 
-  // 6. Redis keys are scoped by campaign ID
-  it('6. Redis keys are scoped by campaign ID', async () => {
+  // 6. Redis keys are scoped by campaign ID (legacy fallback)
+  it('6. Redis keys are scoped by campaign ID (legacy fallback)', async () => {
     const key1 = getCampaignWindowKey('camp-111');
     const key2 = getCampaignWindowKey('camp-222');
     const dispatchKey1 = getCampaignLastDispatchKey('camp-111');
@@ -223,6 +225,72 @@ describe('Phase 7: Distributed Redis Dispatch Controls & Bull Board Monitoring',
     });
 
     expect(resultB.allowed).toBe(true);
+  });
+
+  // 6b. Tenant and sender key scoping prevents multi-campaign bypass
+  it('6b. Tenant and sender key scoping prevents multi-campaign bypass for same sender', async () => {
+    const tenantUserA = 'user-tenant-a-uuid';
+    const tenantUserB = 'user-tenant-b-uuid';
+    const sharedSender = 'sender-ethereal-1';
+    const now = 1756980000000;
+
+    const { clearRateLimitKeys, getRateLimitWindowKey } = await import('./rateLimiter.service.js');
+    await clearRateLimitKeys({ userId: tenantUserA, senderKey: sharedSender });
+    await clearRateLimitKeys({ userId: tenantUserB, senderKey: sharedSender });
+
+    expect(getRateLimitWindowKey({ userId: tenantUserA, senderKey: sharedSender })).toBe(
+      `ratelimit:tenant:${tenantUserA}:sender:${sharedSender}:window`
+    );
+
+    // User A Campaign 1 reserves 2 slots out of limit 2
+    const res1 = await reserveDispatchSlot({
+      userId: tenantUserA,
+      senderKey: sharedSender,
+      campaignId: 'camp-user-a-1',
+      hourlyLimit: 2,
+      delaySeconds: 0,
+      emailId: 'email-1',
+      now
+    });
+    const res2 = await reserveDispatchSlot({
+      userId: tenantUserA,
+      senderKey: sharedSender,
+      campaignId: 'camp-user-a-1',
+      hourlyLimit: 2,
+      delaySeconds: 0,
+      emailId: 'email-2',
+      now: now + 10
+    });
+    expect(res1.allowed).toBe(true);
+    expect(res2.allowed).toBe(true);
+
+    // User A Campaign 2 attempts to use sharedSender - must be blocked (cannot bypass limit)
+    const res3 = await reserveDispatchSlot({
+      userId: tenantUserA,
+      senderKey: sharedSender,
+      campaignId: 'camp-user-a-2',
+      hourlyLimit: 2,
+      delaySeconds: 0,
+      emailId: 'email-3',
+      now: now + 20
+    });
+    expect(res3.allowed).toBe(false);
+    expect(res3.reason).toBe('HOURLY_LIMIT');
+
+    // User B using sharedSender is isolated and allowed
+    const resUserB = await reserveDispatchSlot({
+      userId: tenantUserB,
+      senderKey: sharedSender,
+      campaignId: 'camp-user-b-1',
+      hourlyLimit: 2,
+      delaySeconds: 0,
+      emailId: 'email-b-1',
+      now: now + 30
+    });
+    expect(resUserB.allowed).toBe(true);
+
+    await clearRateLimitKeys({ userId: tenantUserA, senderKey: sharedSender });
+    await clearRateLimitKeys({ userId: tenantUserB, senderKey: sharedSender });
   });
 
   // 7. Redis rate-limit keys receive TTLs

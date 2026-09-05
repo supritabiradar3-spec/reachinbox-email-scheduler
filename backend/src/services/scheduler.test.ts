@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { 
   calculateScheduledTime, 
   deduplicateRecipients, 
@@ -227,6 +227,49 @@ describe('Phase 4: Scheduler Core Calculations & Validators', () => {
       const { verifyAllTransporters } = await import('../services/email.service.js');
       await expect(verifyAllTransporters()).rejects.toThrow('Ethereal SMTP senders are not configured');
 
+      process.env.ETHEREAL_SENDERS_JSON = original;
+    });
+
+    it('should log safe sender identifier only without exposing SMTP email addresses in verifyAllTransporters', async () => {
+      const original = process.env.ETHEREAL_SENDERS_JSON;
+      process.env.ETHEREAL_SENDERS_JSON = JSON.stringify([
+        {
+          key: 'sender-test-safe',
+          displayName: 'Safe Sender',
+          fromEmail: 'secret_sender_address@ethereal.email',
+          user: 'secret_sender_user',
+          pass: 'secret_sender_pass',
+          host: 'smtp.ethereal.email',
+          port: 587,
+          secure: false
+        }
+      ]);
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { verifyAllTransporters, getTransporter } = await import('../services/email.service.js');
+
+      const transporter = getTransporter({
+        key: 'sender-test-safe',
+        displayName: 'Safe Sender',
+        fromEmail: 'secret_sender_address@ethereal.email',
+        user: 'secret_sender_user',
+        pass: 'secret_sender_pass',
+        host: 'smtp.ethereal.email',
+        port: 587,
+        secure: false
+      });
+      vi.spyOn(transporter, 'verify').mockResolvedValue(true as never);
+
+      await verifyAllTransporters();
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[SMTP] Transporter for sender [sender-test-safe] verified successfully.')
+      );
+      expect(logSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('secret_sender_address@ethereal.email')
+      );
+
+      logSpy.mockRestore();
       process.env.ETHEREAL_SENDERS_JSON = original;
     });
 

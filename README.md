@@ -80,14 +80,91 @@ flowchart TD
 - **CSV & TXT Recipient Parsing**: Client-side recipient parsing supporting comma, space, and newline delimiters, RFC 5322 regex validation, header skipping, and duplicate filtering.
 - **Multi-Sender SMTP Orchestration**: Dynamic multi-account sending via Ethereal SMTP with public sender choices exposed without leaking private SMTP credentials.
 - **BullMQ Queue Management**: Background job queuing storing only minimal `{ emailId }` payloads in Redis, with exponential backoff retries and concurrency control.
-- **Distributed Rate Limiting**: Redis-backed sliding 1-hour window per sender (`ZREMRANGEBYSCORE`, `ZCARD`, `ZADD`) and exact inter-email delay scheduling with automatic job requeuing.
+- **Distributed Rate Limiting & Live Slack Alerts**: Redis-backed sliding 1-hour window per tenant + sender with atomic Lua reservation, non-destructive BullMQ deferral, and live Slack Block Kit alerts on quota exhaustion.
 - **MySQL Persistence via Prisma ORM**: Relational database modeling for users, campaigns, scheduled emails, and encrypted Slack installations with foreign keys and indexes.
 - **Elasticsearch Full-Text Search**: Real-time indexing of sent email subjects and bodies with multi-match search queries and user ID scoping.
 - **Safe Snippet Highlighting**: Search match highlighting without `dangerouslySetInnerHTML` by parsing Elasticsearch `<em>` tokens into safe React elements.
 - **Protected Bull Board Queue Monitor**: Interactive queue monitor mounted at `/admin/queues` guarded by Express session authentication.
 - **Real Slack OAuth 2.0 Integration**: Single-use cryptographic CSRF state tokens and AES-256-GCM encryption for Slack bot access tokens at rest.
-- **Idempotent Delivery Reports**: Atomic MySQL status claims (`PENDING -> PROCESSING -> SENT`) ensuring single-delivery Slack Block Kit summaries when campaigns finish.
+- **Idempotent Delivery Reports & Deduped Alerts**: Atomic MySQL status claims (`PENDING -> PROCESSING -> SENT`) for campaign summaries and Redis `SET NX` rate-limit alert deduplication with bounded TTL.
 - **Responsive Dark-Theme Dashboard**: Glassmorphic UI with real-time scheduled and sent metrics, in-place campaign scheduler modal, and search filters.
+
+---
+
+## Distributed Rate Limiting & Real-Time Slack Rate-Limit Alerts
+
+To safeguard sender reputations and conform to upstream SMTP hourly thresholds, the system implements an enterprise-grade distributed rate controller and real-time alert engine.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as BullMQ Worker
+    participant Redis as Redis (Atomic Lua)
+    participant MySQL as MySQL (Prisma)
+    participant Slack as Slack API (Block Kit)
+    participant SMTP as Ethereal SMTP
+
+    Worker->>Redis: reserveDispatchSlot(userId, senderKey, hourlyLimit, delaySeconds)
+    alt Slot Available (allowed = true)
+        Redis-->>Worker: { allowed: true, waitMs: 0 }
+        Worker->>MySQL: Lock status: PROCESSING
+        Worker->>SMTP: sendEmail(senderKey, recipient, subject, body)
+        Worker->>MySQL: Update status: SENT, sentAt: now()
+    else Inter-Email Throttle (reason = MIN_DELAY)
+        Redis-->>Worker: { allowed: false, waitMs: remainingMs, reason: MIN_DELAY }
+        Worker->>MySQL: Update status: RATE_LIMITED, scheduledAt: deferredTime
+        Worker->>Worker: job.moveToDelayed(deferredTime)
+    else Hourly Limit Reached (reason = HOURLY_LIMIT)
+        Redis-->>Worker: { allowed: false, waitMs: windowWaitMs, reason: HOURLY_LIMIT }
+        Worker->>MySQL: Update status: RATE_LIMITED, scheduledAt: deferredTime
+        Worker->>Redis: SET NX alert_key EX ttl
+        opt First detection in window (SET NX acquired)
+            Worker->>Slack: chat.postMessage (Block Kit Rate Limit Alert)
+        end
+        Worker->>Worker: job.moveToDelayed(deferredTime)
+    end
+```
+
+### Key Architectural Tenets
+
+1. **Multi-Tenant & Multi-Sender Scoping**:
+   - Rate limiting is scoped by authenticated user/tenant ID + sender key (`reachinbox:ratelimit:window:user-{userId}:sender-{senderKey}` and `reachinbox:ratelimit:lastdispatch:user-{userId}:sender-{senderKey}`).
+   - Campaign-configured hourly limits are shared and enforced globally across all campaigns sharing the same tenant and sender account to protect SMTP sender quotas.
+
+2. **Atomic Redis / Lua Reservation Engine**:
+   - A single-round-trip atomic Lua script evaluates both rolling 60-minute hourly limit capacity (`ZREMRANGEBYSCORE`, `ZCARD`) and inter-email delay spacing (`GET last_dispatch`).
+   - If capacity is available, the dispatch timestamp is atomically recorded in the sorted set and `last_dispatch` key without concurrency race conditions across multi-worker deployments.
+
+3. **MIN_DELAY vs. HOURLY_LIMIT Deferral Distinction**:
+   - **`MIN_DELAY`**: Job is deferred by the remaining milliseconds until the per-sender minimum inter-email delay is satisfied. This represents routine dispatch pacing and does not trigger alerts.
+   - **`HOURLY_LIMIT`**: Hourly quota has been exhausted. The job is deferred until the oldest rolling slot rolls out of the 60-minute window (calculated exactly via `ZRANGEBYSCORE`). This triggers a real-time Slack alert.
+
+4. **Non-Destructive BullMQ Rescheduling**:
+   - Rate-limited jobs are marked `RATE_LIMITED` in MySQL with their `scheduledAt` updated to the next eligible timestamp, and rescheduled using `job.moveToDelayed(nextEligibleTimestamp)`.
+   - Rate-limited jobs are **never dropped**, **never marked as FAILED**, and **do not consume BullMQ retry attempt counters**.
+
+5. **Live Slack API Alert on First Detection**:
+   - On the first `HOURLY_LIMIT` detection, a live Slack API call (`chat.postMessage`) delivers an actionable Block Kit message to the designated channel.
+   - The alert displays the friendly sender display name, hourly quota, campaign context, and the next eligible dispatch timestamp in UTC.
+
+6. **Distributed Deduplication (`Redis SET NX`)**:
+   - High-throughput bursts on a rate-limited sender are deduplicated via `reachinbox:ratelimit:alert:user-{userId}:sender-{senderKey}` with a bounded TTL matching the wait duration.
+   - Prevents flooding Slack channels with duplicate alerts while automatically allowing notifications in subsequent hourly windows.
+
+7. **Resilient Failure Handling & Dynamic Reconnection**:
+   - If Slack is disconnected, the destination channel is missing, or the Slack API fails/times out, the notification is safely skipped/logged as a warning without throwing or interrupting email deferral.
+   - Dynamic database lookup on every rate-limit hit ensures that when a user connects or reconnects Slack, notifications immediately work without server or worker redeployment.
+   - The existing idempotent campaign-completion Slack notification remains fully available and operates independently.
+
+8. **Safe Operational Logging**:
+   - All worker logs use safe identifiers (e.g. sender keys `[sender-1]`, campaign IDs, sanitized error messages).
+   - Sender SMTP email addresses, usernames, passwords, OAuth tokens, recipient addresses, and message bodies are never printed to application logs.
+
+### Architectural Trade-offs
+
+- **Tenant + Sender Scoping vs. Campaign Isolation**: Scoping to tenant + sender prevents exceeding external SMTP quotas across simultaneous campaigns from the same sender account, but means concurrent campaigns share the same hourly allowance.
+- **Sliding Sorted Set (ZSET) vs. Fixed Window**: Redis sorted sets provide true rolling 60-minute window precision without boundary-reset spikes, at the cost of $O(\log N)$ memory proportional to the hourly quota per active sender.
+- **Redis SET NX Alert Dedup vs. Notification Queue**: In-memory TTL keys provide low-latency, zero-storage alert suppression on the leading edge of a rate limit without maintaining persistent alert queues.
 
 ---
 
@@ -410,16 +487,16 @@ npm run build
 
 ### Verified Test Results
 ```text
-✓ backend (76 tests passed)
-  - slack.test.ts (28 tests)
-  - scheduler.test.ts (32 tests)
-  - rateLimiter.test.ts (16 tests)
+✓ backend (85 tests passed)
+  - slack.test.ts (35 tests)
+  - scheduler.test.ts (33 tests)
+  - rateLimiter.test.ts (17 tests)
 
 ✓ frontend (24 tests passed)
   - recipientParser.test.ts (18 tests)
   - highlightHelper.test.ts (6 tests)
 
-Total: 100/100 tests passed (100% pass rate)
+Total: 109/109 tests passed (100% pass rate)
 Typecheck: 0 errors
 Production Build: Successful
 ```
@@ -489,6 +566,7 @@ Ensure the following features are showcased during demonstration:
 5. [ ] **Bull Board Monitoring**: Observe active jobs in `http://localhost:5000/admin/queues`.
 6. [ ] **Sent Email Search**: Search sent emails with highlighted keywords.
 7. [ ] **Slack Delivery Report**: Verify Block Kit completion summary posted in Slack.
+8. [ ] **Slack Rate-Limit Alert**: Verify Block Kit rate-limit alert posted on sender hourly limit exhaustion.
 
 ---
 
@@ -547,6 +625,20 @@ Automated Block Kit delivery summary posted to the designated Slack channel upon
 Optimized mobile interface (tested at 390px viewport) with responsive metric badges, compact tab navigation, and touch-friendly controls.
 
 ![ReachInbox Mobile Responsive Dashboard](docs/screenshots/08-mobile-dashboard.png)
+
+---
+
+### 9. Real-Time Slack Rate-Limit Alert
+Live Slack Block Kit notification triggered when a sender reaches their configured hourly dispatch limit, displaying the sender display name, hourly quota, campaign context, and the next eligible dispatch time.
+
+![Slack Hourly Rate Limit Reached Notification](docs/screenshots/09-slack-rate-limit-alert.png)
+
+---
+
+### 10. BullMQ Delayed Rate-Limited Job
+Bull Board queue visualizer showing completed jobs and delayed jobs gracefully rescheduled by the background worker without job loss or failure count incrementation.
+
+![Bull Board Delayed Rate-Limited Job](docs/screenshots/10-rate-limited-job-delayed.png)
 
 ---
 
