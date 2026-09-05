@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { ComposeModal } from './components/ComposeModal';
 import { HighlightSnippet } from './utils/highlightHelper';
+import { OperationsControlCenter } from './components/OperationsControlCenter';
 
 interface AuthUser {
   name: string | null;
@@ -168,6 +169,38 @@ export default function App(): React.JSX.Element {
   const [authError, setAuthError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
   const [redirectingToGoogle, setRedirectingToGoogle] = useState<boolean>(false);
+
+  // Views: 'operations' (default Operations Control Center) | 'scheduler' (Email Scheduler dashboard)
+  const [currentView, setCurrentView] = useState<'scheduler' | 'operations'>('operations');
+
+  const handleNavigateView = (view: 'scheduler' | 'operations') => {
+    setCurrentView(view);
+    if (typeof window !== 'undefined') {
+      window.history.pushState({ view }, '', view === 'scheduler' ? '#scheduler' : '#operations');
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (event.state?.view) {
+        setCurrentView(event.state.view);
+      } else if (window.location.hash === '#scheduler') {
+        setCurrentView('scheduler');
+      } else {
+        // Empty hash or #operations
+        setCurrentView('operations');
+      }
+    };
+
+    if (window.location.hash === '#scheduler') {
+      setCurrentView('scheduler');
+    } else {
+      setCurrentView('operations');
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Tabs & Compose Modal
   const [activeTab, setActiveTab] = useState<'scheduled' | 'sent'>('scheduled');
@@ -691,6 +724,20 @@ export default function App(): React.JSX.Element {
                 </a>
               )}
 
+              {/* System Health Header Button (only visible on Email Scheduler page) */}
+              {currentView === 'scheduler' && (
+                <button
+                  id="system-health-btn"
+                  onClick={() => handleNavigateView('operations')}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition active:scale-[0.98] bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-white border-slate-700/80"
+                  title="Open Operations Control Center"
+                  aria-label="Open Operations Control Center"
+                >
+                  <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden sm:inline">System Health</span>
+                </button>
+              )}
+
               <a
                 href={queueMonitorUrl}
                 target="_blank"
@@ -819,6 +866,11 @@ export default function App(): React.JSX.Element {
               </div>
             </div>
           </div>
+        ) : currentView === 'operations' ? (
+          /* Operations Control Center */
+          <OperationsControlCenter
+            onNavigateToScheduler={() => handleNavigateView('scheduler')}
+          />
         ) : (
           /* Authenticated SaaS Dashboard */
           <div className="space-y-6">
@@ -1179,70 +1231,17 @@ export default function App(): React.JSX.Element {
                                 : 'Create a campaign to schedule your next batch of emails.'}
                             </p>
                           </div>
-                          <div className="pt-1.5">
-                            {activeScheduledSearch ? (
+                          {activeScheduledSearch && (
+                            <div className="pt-1.5">
                               <button
                                 onClick={handleClearScheduledSearch}
                                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium border border-slate-700 transition"
                               >
                                 Clear Search Filter
                               </button>
-                            ) : (
-                              <button
-                                onClick={() => setIsComposeOpen(true)}
-                                className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
-                              >
-                                <Plus className="w-3.5 h-3.5" />
-                                <span>Compose New Email</span>
-                              </button>
-                            )}
-                          </div>
+                            </div>
+                          )}
                         </div>
-
-                        {/* Recent Delivery Activity (if sent records exist and not in search mode) */}
-                        {!activeScheduledSearch && sentEmails.length > 0 && (
-                          <div className="pt-6 border-t border-slate-800/80 text-left max-w-2xl mx-auto space-y-3">
-                            <div className="flex items-center justify-between">
-                              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
-                                <Send className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>Recent Delivery Activity</span>
-                              </h4>
-                              <button
-                                onClick={() => setActiveTab('sent')}
-                                className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition focus-visible:ring-2 focus-visible:ring-indigo-500 rounded px-1 focus-visible:outline-none"
-                              >
-                                View all sent emails &rarr;
-                              </button>
-                            </div>
-
-                            <div className="space-y-2">
-                              {sentEmails.slice(0, 3).map((item) => (
-                                <div
-                                  key={`recent-${item.id}`}
-                                  className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <p className="text-slate-200 font-medium truncate" title={item.subject}>
-                                      {item.subject}
-                                    </p>
-                                    <div className="flex items-center space-x-2 mt-0.5 text-[11px] text-slate-400">
-                                      <span className="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 font-medium text-[10px]">
-                                        {getFriendlySenderName(item.senderKey)}
-                                      </span>
-                                      <span className="text-slate-500" aria-hidden="true">•</span>
-                                      <span className="font-mono text-[10px]">
-                                        {formatDateTime(item.sentAt)}
-                                      </span>
-                                    </div>
-                                  </div>
-                                  <div className="self-start sm:self-center shrink-0">
-                                    <StatusBadge status={item.status} />
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
                       </div>
                     ) : (
                       /* Scheduled Emails View */
